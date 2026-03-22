@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "openai": "^4.0.0",
-    "weixin-agent-sdk": "*"
+    "weixin-agent-sdk": "workspace:*"
   },
   "devDependencies": {
     "tsx": "^4.0.0",
