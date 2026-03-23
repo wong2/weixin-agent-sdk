@@ -16,6 +16,14 @@ function log(msg: string) {
   console.log(`[acp] ${msg}`);
 }
 
+function describeToolCall(update: {
+  title?: string | null;
+  kind?: string | null;
+  toolCallId?: string;
+}): string {
+  return update.title ?? update.kind ?? update.toolCallId ?? "tool";
+}
+
 /**
  * Manages the ACP agent subprocess and ClientSideConnection lifecycle.
  */
@@ -69,11 +77,11 @@ export class AcpConnection {
         const update = params.update;
         switch (update.sessionUpdate) {
           case "tool_call":
-            log(`tool_call: ${update.title} (${update.status ?? "started"})`);
+            log(`tool_call: ${describeToolCall(update)} (${update.status ?? "started"})`);
             break;
           case "tool_call_update":
             if (update.status) {
-              log(`tool_call_update: ${update.title ?? update.toolCallId} → ${update.status}`);
+              log(`tool_call_update: ${describeToolCall(update)} → ${update.status}`);
             }
             break;
           case "agent_thought_chunk":
@@ -89,11 +97,13 @@ export class AcpConnection {
       },
       requestPermission: async (params) => {
         const firstOption = params.options[0];
-        log(`permission: auto-approved "${firstOption?.id ?? "allow"}"`);
+        log(
+          `permission: auto-approved "${firstOption?.name ?? "allow"}" (${firstOption?.optionId ?? "unknown"})`,
+        );
         return {
           outcome: {
             outcome: "selected" as const,
-            optionId: firstOption?.id ?? "allow",
+            optionId: firstOption?.optionId ?? "allow",
           },
         };
       },

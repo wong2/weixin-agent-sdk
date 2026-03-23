@@ -10,6 +10,8 @@ function log(msg: string) {
   console.log(`[acp] ${msg}`);
 }
 
+const DEFAULT_PROMPT_TIMEOUT_MS = 120_000;
+
 /**
  * Agent adapter that bridges ACP (Agent Client Protocol) agents
  * to the weixin-agent-sdk Agent interface.
@@ -43,7 +45,7 @@ export class AcpAgent implements Agent {
     const collector = new ResponseCollector();
     this.connection.registerCollector(sessionId, collector);
     try {
-      await conn.prompt({ sessionId, prompt: blocks });
+      await this.runPromptWithTimeout(conn, sessionId, blocks);
     } finally {
       this.connection.unregisterCollector(sessionId);
     }
@@ -68,6 +70,43 @@ export class AcpAgent implements Agent {
     log(`session created: ${res.sessionId}`);
     this.sessions.set(conversationId, res.sessionId);
     return res.sessionId;
+  }
+
+  private async runPromptWithTimeout(
+    conn: Awaited<ReturnType<AcpConnection["ensureReady"]>>,
+    sessionId: SessionId,
+    prompt: ChatRequest["text"] extends string ? Awaited<ReturnType<typeof convertRequestToContentBlocks>> : never,
+  ): Promise<void> {
+    const timeoutMs = this.options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
+    const promptPromise = conn.prompt({ sessionId, prompt });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+
+    try {
+      await Promise.race([
+        promptPromise.then(() => undefined),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            log(`prompt timeout after ${timeoutMs}ms, cancelling session=${sessionId}`);
+            void conn.cancel({ sessionId }).catch((err) => {
+              log(`cancel failed for session=${sessionId}: ${String(err)}`);
+            });
+            reject(new Error(`ACP prompt timeout after ${timeoutMs}ms`));
+          }, timeoutMs);
+        }),
+      ]);
+    } catch (err) {
+      if (timedOut) {
+        await promptPromise.catch(() => {});
+      }
+      throw err;
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   /**
