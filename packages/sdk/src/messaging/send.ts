@@ -266,6 +266,35 @@ export async function sendFileMessageWeixin(params: {
   return sendMediaItems({ to, text, mediaItem: fileItem, opts, label: "sendFileMessageWeixin" });
 }
 
+/** Minimum interval (ms) between GENERATING frame sends to avoid rate limiting. */
+const STREAM_THROTTLE_MS = 300;
+
+/**
+ * Send a FINISH frame for the given clientId / text, best-effort.
+ * Used both for normal completion and for error-recovery cleanup.
+ */
+async function sendFinishFrame(
+  to: string,
+  clientId: string,
+  text: string,
+  opts: WeixinApiOptions & { contextToken?: string },
+): Promise<void> {
+  const finishReq: SendMessageReq = {
+    msg: {
+      from_user_id: "",
+      to_user_id: to,
+      client_id: clientId,
+      message_type: MessageType.BOT,
+      message_state: MessageState.FINISH,
+      item_list: text
+        ? [{ type: MessageItemType.TEXT, text_item: { text } }]
+        : undefined,
+      context_token: opts.contextToken,
+    },
+  };
+  await sendMessageApi({ baseUrl: opts.baseUrl, token: opts.token, body: finishReq });
+}
+
 /**
  * Stream a text response using WeChat's GENERATING → FINISH message-state protocol.
  *
@@ -275,6 +304,12 @@ export async function sendFileMessageWeixin(params: {
  *
  * The final FINISH frame is sent automatically after the iterable is exhausted,
  * containing the last accumulated text.
+ *
+ * **Error recovery:** if a chunk send fails, the function tries to send a
+ * FINISH frame so the bubble does not get stuck in GENERATING state.
+ *
+ * **Throttling:** consecutive GENERATING frames are rate-limited to one every
+ * `STREAM_THROTTLE_MS` milliseconds to avoid hitting WeChat API rate limits.
  */
 export async function sendStreamingMessageWeixin(params: {
   to: string;
@@ -289,46 +324,46 @@ export async function sendStreamingMessageWeixin(params: {
 
   const clientId = generateClientId();
   let lastText = "";
+  let lastSendTime = 0;
 
-  for await (const chunk of chunks) {
-    lastText = chunk.text;
-    const req: SendMessageReq = {
-      msg: {
-        from_user_id: "",
-        to_user_id: to,
-        client_id: clientId,
-        message_type: MessageType.BOT,
-        message_state: MessageState.GENERATING,
-        item_list: lastText
-          ? [{ type: MessageItemType.TEXT, text_item: { text: lastText } }]
-          : undefined,
-        context_token: opts.contextToken,
-      },
-    };
-    try {
+  try {
+    for await (const chunk of chunks) {
+      lastText = chunk.text;
+
+      // Throttle: skip this frame if it arrives too soon after the last send.
+      const now = Date.now();
+      if (now - lastSendTime < STREAM_THROTTLE_MS) {
+        continue;
+      }
+
+      const req: SendMessageReq = {
+        msg: {
+          from_user_id: "",
+          to_user_id: to,
+          client_id: clientId,
+          message_type: MessageType.BOT,
+          message_state: MessageState.GENERATING,
+          item_list: lastText
+            ? [{ type: MessageItemType.TEXT, text_item: { text: lastText } }]
+            : undefined,
+          context_token: opts.contextToken,
+        },
+      };
       await sendMessageApi({ baseUrl: opts.baseUrl, token: opts.token, body: req });
-    } catch (err) {
-      logger.error(`sendStreamingMessageWeixin: chunk send failed to=${to} err=${String(err)}`);
-      throw err;
+      lastSendTime = Date.now();
     }
+  } catch (err) {
+    logger.error(`sendStreamingMessageWeixin: chunk send failed to=${to} err=${String(err)}`);
+    // Best-effort: send a FINISH frame so the bubble doesn't stay stuck in GENERATING.
+    try {
+      await sendFinishFrame(to, clientId, lastText, opts);
+    } catch { /* swallow — original error is more important */ }
+    throw err;
   }
 
   // Final FINISH frame — marks the end of the stream.
-  const finishReq: SendMessageReq = {
-    msg: {
-      from_user_id: "",
-      to_user_id: to,
-      client_id: clientId,
-      message_type: MessageType.BOT,
-      message_state: MessageState.FINISH,
-      item_list: lastText
-        ? [{ type: MessageItemType.TEXT, text_item: { text: lastText } }]
-        : undefined,
-      context_token: opts.contextToken,
-    },
-  };
   try {
-    await sendMessageApi({ baseUrl: opts.baseUrl, token: opts.token, body: finishReq });
+    await sendFinishFrame(to, clientId, lastText, opts);
   } catch (err) {
     logger.error(`sendStreamingMessageWeixin: finish frame failed to=${to} err=${String(err)}`);
     throw err;

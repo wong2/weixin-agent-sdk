@@ -12,8 +12,9 @@ export interface Agent {
   /** Clear/reset the session for a given conversation. */
   clearSession?(conversationId: string): void;
   /**
-   * Optional streaming variant. When defined, the SDK calls this instead of
-   * `chat()` and renders the output incrementally in the WeChat message bubble.
+   * Optional streaming variant. When defined **and** `shouldStream()` does not
+   * return `false`, the SDK calls this instead of `chat()` and renders the
+   * output incrementally in the WeChat message bubble.
    *
    * Each yielded chunk should carry the **accumulated** text so far (not a
    * delta), so that the WeChat client can update the bubble in-place.
@@ -28,6 +29,18 @@ export interface Agent {
    * }
    */
   chatStream?(request: ChatRequest): AsyncIterable<ChatStreamChunk>;
+
+  /**
+   * Optional per-request gate for streaming.
+   *
+   * When `chatStream` is defined the SDK checks this method first. If it
+   * returns `false`, the SDK falls back to `chat()` for that request — which
+   * allows returning media, multi-message replies, or other non-text content.
+   *
+   * If not implemented, the SDK streams whenever `chatStream` is present
+   * (backward-compatible default).
+   */
+  shouldStream?(request: ChatRequest): boolean;
 }
 
 export interface ChatRequest {

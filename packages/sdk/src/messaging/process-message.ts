@@ -67,7 +67,10 @@ function extractTextBody(itemList?: MessageItem[]): string {
 function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
   if (!itemList?.length) return undefined;
 
-  // Direct media: IMAGE > VIDEO > FILE > VOICE (skip voice with transcription)
+  // Direct media: IMAGE > VIDEO > FILE > VOICE
+  // Voice items are always downloaded — even when WeChat provides a
+  // transcription text — so that audio-aware agents can choose between
+  // the transcript and the original waveform.
   const direct =
     itemList.find(
       (i) => i.type === MessageItemType.IMAGE && i.image_item?.media?.encrypt_query_param,
@@ -81,8 +84,7 @@ function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
     itemList.find(
       (i) =>
         i.type === MessageItemType.VOICE &&
-        i.voice_item?.media?.encrypt_query_param &&
-        !i.voice_item.text,
+        i.voice_item?.media?.encrypt_query_param,
     );
   if (direct) return direct;
 
@@ -200,8 +202,26 @@ export async function processOneMessage(
   try {
     const deliverOpts = { baseUrl: deps.baseUrl, cdnBaseUrl: deps.cdnBaseUrl, token: deps.token };
 
-    // 1. Streaming path — preferred when the agent supports it.
-    if (deps.agent.chatStream) {
+    // 1. Streaming path — preferred when the agent supports it AND the agent
+    //    does not explicitly opt out for this request via shouldStream().
+    const useStream =
+      deps.agent.chatStream &&
+      (deps.agent.shouldStream ? deps.agent.shouldStream(request) : true);
+
+    if (useStream && deps.agent.chatStream) {
+      // Cancel typing before streaming — the GENERATING frames serve as the
+      // visual indicator from here on.
+      if (deps.typingTicket) {
+        sendTyping({
+          baseUrl: deps.baseUrl,
+          token: deps.token,
+          body: {
+            ilink_user_id: to,
+            typing_ticket: deps.typingTicket,
+            status: TypingStatus.CANCEL,
+          },
+        }).catch(() => {});
+      }
       await sendStreamingMessageWeixin({
         to,
         chunks: deps.agent.chatStream(request),

@@ -8,8 +8,9 @@ import {
   PROTOCOL_VERSION,
 } from "@agentclientprotocol/sdk";
 import type { SessionId } from "@agentclientprotocol/sdk";
+import type { PermissionOption } from "@agentclientprotocol/sdk/dist/schema/types.gen.js";
 
-import type { AcpAgentOptions } from "./types.js";
+import type { AcpAgentOptions, PermissionPolicy } from "./types.js";
 import { ResponseCollector } from "./response-collector.js";
 
 function log(msg: string) {
@@ -24,8 +25,15 @@ export class AcpConnection {
   private connection: ClientSideConnection | null = null;
   private ready = false;
   private collectors = new Map<SessionId, ResponseCollector>();
+  /** Agent's negotiated prompt capabilities — populated after initialize(). */
+  private _promptCapabilities: { image?: boolean; audio?: boolean; embeddedContext?: boolean } = {};
 
   constructor(private options: AcpAgentOptions) {}
+
+  /** Prompt capabilities reported by the agent after initialization. */
+  get promptCapabilities(): Readonly<{ image?: boolean; audio?: boolean; embeddedContext?: boolean }> {
+    return this._promptCapabilities;
+  }
 
   registerCollector(sessionId: SessionId, collector: ResponseCollector): void {
     this.collectors.set(sessionId, collector);
@@ -88,24 +96,56 @@ export class AcpConnection {
         }
       },
       requestPermission: async (params) => {
-        const firstOption = params.options[0];
-        log(`permission: auto-approved "${firstOption?.id ?? "allow"}"`);
-        return {
-          outcome: {
-            outcome: "selected" as const,
-            optionId: firstOption?.id ?? "allow",
-          },
-        };
+        const policy: PermissionPolicy = this.options.permissionPolicy ?? "reject";
+        const opts = params.options;
+
+        if (typeof policy === "function") {
+          const mapped = opts.map((o: PermissionOption) => ({ id: o.optionId, kind: o.kind, name: o.name }));
+          const chosen = policy(mapped);
+          if (chosen) {
+            log(`permission: policy callback chose "${chosen}"`);
+            return { outcome: { outcome: "selected" as const, optionId: chosen } };
+          }
+          log("permission: policy callback cancelled");
+          return { outcome: { outcome: "cancelled" as const } };
+        }
+
+        if (policy === "allow-once") {
+          // Pick the "allow_once" option if available, otherwise fall through to reject.
+          const allowOnce = opts.find((o: PermissionOption) => o.kind === "allow_once");
+          if (allowOnce) {
+            log(`permission: allow-once "${allowOnce.optionId}"`);
+            return { outcome: { outcome: "selected" as const, optionId: allowOnce.optionId } };
+          }
+          log("permission: no allow_once option found, rejecting");
+        }
+
+        // Default: reject (safest for unattended bots).
+        const reject = opts.find((o: PermissionOption) => o.kind === "reject_once" || o.kind === "reject_always");
+        if (reject) {
+          log(`permission: rejected "${reject.optionId}"`);
+          return { outcome: { outcome: "selected" as const, optionId: reject.optionId } };
+        }
+        log("permission: no reject option, cancelling");
+        return { outcome: { outcome: "cancelled" as const } };
       },
     }), stream);
 
     log("initializing connection...");
-    await conn.initialize({
+    const initResult = await conn.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientInfo: { name: "weixin-agent-sdk", version: "0.1.0" },
       clientCapabilities: {},
     });
-    log("connection initialized");
+
+    // Save agent's prompt capabilities for content conversion.
+    const caps = initResult.agentCapabilities?.promptCapabilities;
+    this._promptCapabilities = {
+      image: caps?.image,
+      audio: caps?.audio,
+      embeddedContext: caps?.embeddedContext,
+    };
+    log(`connection initialized (capabilities: image=${!!caps?.image} audio=${!!caps?.audio} embeddedContext=${!!caps?.embeddedContext})`);
 
     this.connection = conn;
     this.ready = true;

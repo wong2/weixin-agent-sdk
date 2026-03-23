@@ -30,8 +30,11 @@ export class AcpAgent implements Agent {
     // Get or create an ACP session for this conversation
     const sessionId = await this.getOrCreateSession(request.conversationId, conn);
 
-    // Convert the ChatRequest to ACP ContentBlock[]
-    const blocks = await convertRequestToContentBlocks(request);
+    // Convert the ChatRequest to ACP ContentBlock[], respecting agent capabilities.
+    const blocks = await convertRequestToContentBlocks(
+      request,
+      this.connection.promptCapabilities,
+    );
     if (blocks.length === 0) {
       return { text: "" };
     }

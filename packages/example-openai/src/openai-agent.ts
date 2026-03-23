@@ -10,7 +10,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import OpenAI from "openai";
-import type { Agent, ChatRequest, ChatResponse } from "weixin-agent-sdk";
+import type { Agent, ChatRequest, ChatResponse, ChatStreamChunk } from "weixin-agent-sdk";
 
 export type OpenAIAgentOptions = {
   apiKey: string;
@@ -40,10 +40,13 @@ export class OpenAIAgent implements Agent {
     this.maxHistory = opts.maxHistory ?? 50;
   }
 
-  async chat(request: ChatRequest): Promise<ChatResponse> {
-    const history = this.conversations.get(request.conversationId) ?? [];
-
-    // Build user message content
+  /**
+   * Build the user message content parts from a ChatRequest.
+   * Returns null if the request has no meaningful content.
+   */
+  private async buildUserContent(
+    request: ChatRequest,
+  ): Promise<OpenAI.ChatCompletionContentPart[] | null> {
     const content: OpenAI.ChatCompletionContentPart[] = [];
 
     if (request.text) {
@@ -51,7 +54,6 @@ export class OpenAIAgent implements Agent {
     }
 
     if (request.media?.type === "image") {
-      // Send image as base64 for vision models
       const imageData = await fs.readFile(request.media.filePath);
       const base64 = imageData.toString("base64");
       const mimeType = request.media.mimeType || "image/jpeg";
@@ -60,7 +62,6 @@ export class OpenAIAgent implements Agent {
         image_url: { url: `data:${mimeType};base64,${base64}` },
       });
     } else if (request.media) {
-      // Non-image media: describe as text attachment
       const fileName =
         request.media.fileName ?? path.basename(request.media.filePath);
       content.push({
@@ -69,7 +70,56 @@ export class OpenAIAgent implements Agent {
       });
     }
 
-    if (content.length === 0) {
+    return content.length > 0 ? content : null;
+  }
+
+  /**
+   * Prepare the messages array for the OpenAI API call.
+   *
+   * Returns a **snapshot** of the conversation including the new user message.
+   * The shared `history` is NOT mutated until the caller explicitly commits.
+   */
+  private prepareMessages(
+    history: Message[],
+    userMessage: Message,
+  ): Message[] {
+    const messages: Message[] = [];
+    if (this.systemPrompt) {
+      messages.push({ role: "system", content: this.systemPrompt });
+    }
+    messages.push(...history, userMessage);
+    return messages;
+  }
+
+  /**
+   * Commit user + assistant messages to the per-conversation history.
+   *
+   * Builds a **new** array from the snapshot so that the Map is only updated
+   * atomically on success — no in-place mutation of shared state.
+   */
+  private commitHistory(
+    conversationId: string,
+    historySnapshot: Message[],
+    userMessage: Message,
+    assistantContent: string,
+  ): void {
+    const updated = [
+      ...historySnapshot,
+      userMessage,
+      { role: "assistant" as const, content: assistantContent },
+    ];
+    if (updated.length > this.maxHistory) {
+      updated.splice(0, updated.length - this.maxHistory);
+    }
+    this.conversations.set(conversationId, updated);
+  }
+
+  async chat(request: ChatRequest): Promise<ChatResponse> {
+    // Snapshot: work on a copy so that failures never pollute the shared history.
+    const history = [...(this.conversations.get(request.conversationId) ?? [])];
+
+    const content = await this.buildUserContent(request);
+    if (!content) {
       return { text: "" };
     }
 
@@ -80,14 +130,8 @@ export class OpenAIAgent implements Agent {
           ? content[0].text
           : content,
     };
-    history.push(userMessage);
 
-    // Build messages array with optional system prompt
-    const messages: Message[] = [];
-    if (this.systemPrompt) {
-      messages.push({ role: "system", content: this.systemPrompt });
-    }
-    messages.push(...history);
+    const messages = this.prepareMessages(history, userMessage);
 
     const response = await this.client.chat.completions.create({
       model: this.model,
@@ -95,15 +139,51 @@ export class OpenAIAgent implements Agent {
     });
 
     const reply = response.choices[0]?.message?.content ?? "";
-    history.push({ role: "assistant", content: reply });
 
-    // Trim history to prevent unbounded growth
-    if (history.length > this.maxHistory) {
-      history.splice(0, history.length - this.maxHistory);
-    }
-
-    this.conversations.set(request.conversationId, history);
+    // Only commit history after a successful API call.
+    this.commitHistory(request.conversationId, history, userMessage, reply);
 
     return { text: reply };
+  }
+
+  async *chatStream(request: ChatRequest): AsyncIterable<ChatStreamChunk> {
+    // Snapshot: work on a copy so that failures never pollute the shared history.
+    const history = [...(this.conversations.get(request.conversationId) ?? [])];
+
+    const content = await this.buildUserContent(request);
+    if (!content) return;
+
+    const userMessage: Message = {
+      role: "user" as const,
+      content:
+        content.length === 1 && content[0].type === "text"
+          ? content[0].text
+          : content,
+    };
+
+    const messages = this.prepareMessages(history, userMessage);
+
+    const stream = await this.client.chat.completions.create({
+      model: this.model,
+      messages,
+      stream: true,
+    });
+
+    let accumulated = "";
+    for await (const part of stream) {
+      const delta = part.choices[0]?.delta?.content;
+      if (delta) {
+        accumulated += delta;
+        yield { text: accumulated };
+      }
+    }
+
+    // Commit history only after the stream completes successfully.
+    this.commitHistory(
+      request.conversationId,
+      history,
+      userMessage,
+      accumulated,
+    );
   }
 }
