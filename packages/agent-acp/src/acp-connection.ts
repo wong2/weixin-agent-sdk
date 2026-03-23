@@ -49,6 +49,7 @@ export class AcpConnection {
       stdio: ["pipe", "pipe", "inherit"],
       env: { ...process.env, ...this.options.env },
       cwd: this.options.cwd,
+      shell: true,
     });
     this.process = proc;
 
