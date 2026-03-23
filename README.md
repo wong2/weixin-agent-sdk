@@ -44,6 +44,45 @@ npm install -g @zed-industries/codex-acp
 npx weixin-acp start -- codex-acp
 ```
 
+### 在同一个微信会话里切换 Claude / Codex
+
+如果你希望在手机上直接切换后端，而不是为每个后端单独启动一个 bot，可以使用 `router config` 模式：
+
+```bash
+# 安装两个 ACP agent
+npm install -g @zed-industries/claude-agent-acp @zed-industries/codex-acp
+
+# 使用多后端路由启动
+npx weixin-acp start --router-config ./packages/agent-acp/router.example.json
+```
+
+示例配置文件：
+
+```json
+{
+  "defaultBackend": "claude",
+  "backends": {
+    "claude": {
+      "command": "claude-agent-acp"
+    },
+    "codex": {
+      "command": "codex-acp"
+    }
+  }
+}
+```
+
+启动后，可以在微信里直接发送：
+
+- `/claude`：切换当前会话默认后端到 Claude
+- `/codex`：切换当前会话默认后端到 Codex
+- `/claude 解释这个错误`：本条消息直接走 Claude，并切换默认后端
+- `/codex 帮我改这段代码`：本条消息直接走 Codex，并切换默认后端
+- `/mode`：查看当前默认后端和可用后端
+- `/mode claude` / `/mode codex`：只切换默认后端，不发送问题
+
+这个默认后端会按微信会话持久化保存，重启桥接进程后仍然生效。
+
 ### kimi-cli
 
 ```bash

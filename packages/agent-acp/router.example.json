@@ -1,0 +1,11 @@
+{
+  "defaultBackend": "claude",
+  "backends": {
+    "claude": {
+      "command": "claude-agent-acp"
+    },
+    "codex": {
+      "command": "codex-acp"
+    }
+  }
+}
