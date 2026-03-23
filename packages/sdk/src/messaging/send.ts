@@ -5,6 +5,7 @@ import { generateId } from "../util/random.js";
 import type { MessageItem, SendMessageReq } from "../api/types.js";
 import { MessageItemType, MessageState, MessageType } from "../api/types.js";
 import type { UploadedFileInfo } from "../cdn/upload.js";
+import type { ChatStreamChunk } from "../agent/interface.js";
 
 export function generateClientId(): string {
   return generateId("openclaw-weixin");
@@ -263,4 +264,76 @@ export async function sendFileMessageWeixin(params: {
   };
 
   return sendMediaItems({ to, text, mediaItem: fileItem, opts, label: "sendFileMessageWeixin" });
+}
+
+/**
+ * Stream a text response using WeChat's GENERATING → FINISH message-state protocol.
+ *
+ * All chunks share the same `client_id`, so the WeChat client can update the
+ * message bubble in-place rather than appending new bubbles.  Each chunk must
+ * carry the **accumulated** text so far (not a delta).
+ *
+ * The final FINISH frame is sent automatically after the iterable is exhausted,
+ * containing the last accumulated text.
+ */
+export async function sendStreamingMessageWeixin(params: {
+  to: string;
+  chunks: AsyncIterable<ChatStreamChunk>;
+  opts: WeixinApiOptions & { contextToken?: string };
+}): Promise<{ messageId: string }> {
+  const { to, chunks, opts } = params;
+  if (!opts.contextToken) {
+    logger.error(`sendStreamingMessageWeixin: contextToken missing, refusing to send to=${to}`);
+    throw new Error("sendStreamingMessageWeixin: contextToken is required");
+  }
+
+  const clientId = generateClientId();
+  let lastText = "";
+
+  for await (const chunk of chunks) {
+    lastText = chunk.text;
+    const req: SendMessageReq = {
+      msg: {
+        from_user_id: "",
+        to_user_id: to,
+        client_id: clientId,
+        message_type: MessageType.BOT,
+        message_state: MessageState.GENERATING,
+        item_list: lastText
+          ? [{ type: MessageItemType.TEXT, text_item: { text: lastText } }]
+          : undefined,
+        context_token: opts.contextToken,
+      },
+    };
+    try {
+      await sendMessageApi({ baseUrl: opts.baseUrl, token: opts.token, body: req });
+    } catch (err) {
+      logger.error(`sendStreamingMessageWeixin: chunk send failed to=${to} err=${String(err)}`);
+      throw err;
+    }
+  }
+
+  // Final FINISH frame — marks the end of the stream.
+  const finishReq: SendMessageReq = {
+    msg: {
+      from_user_id: "",
+      to_user_id: to,
+      client_id: clientId,
+      message_type: MessageType.BOT,
+      message_state: MessageState.FINISH,
+      item_list: lastText
+        ? [{ type: MessageItemType.TEXT, text_item: { text: lastText } }]
+        : undefined,
+      context_token: opts.contextToken,
+    },
+  };
+  try {
+    await sendMessageApi({ baseUrl: opts.baseUrl, token: opts.token, body: finishReq });
+  } catch (err) {
+    logger.error(`sendStreamingMessageWeixin: finish frame failed to=${to} err=${String(err)}`);
+    throw err;
+  }
+
+  logger.debug(`sendStreamingMessageWeixin: done to=${to} clientId=${clientId}`);
+  return { messageId: clientId };
 }

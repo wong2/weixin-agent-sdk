@@ -56,17 +56,20 @@ npx weixin-acp start -- kimi acp
 
 ## 自定义 Agent
 
-SDK 只导出三样东西：
+SDK 核心导出：
 
 - **`Agent`** 接口 —— 实现它就能接入微信
 - **`login()`** —— 扫码登录
-- **`start(agent)`** —— 启动消息循环
+- **`start(agent)`** —— 启动消息循环（支持通过 `onReady` 获取主动推送能力）
 
 ### Agent 接口
 
 ```typescript
 interface Agent {
   chat(request: ChatRequest): Promise<ChatResponse>;
+
+  // 可选：流式回复。定义后 SDK 优先调用此方法，回复在微信气泡中实时更新。
+  chatStream?(request: ChatRequest): AsyncIterable<ChatStreamChunk>;
 }
 
 interface ChatRequest {
@@ -87,6 +90,13 @@ interface ChatResponse {
     url: string;                  // 本地路径或 HTTPS URL
     fileName?: string;
   };
+  // 可选：发送多条消息。设置后 text/media 字段被忽略，按顺序逐条发送。
+  messages?: Array<{ text?: string; media?: { type: "image"|"video"|"file"; url: string; fileName?: string } }>;
+}
+
+// 流式 chunk —— 每次 yield 携带截止当前的完整文本（非增量）
+interface ChatStreamChunk {
+  text: string;
 }
 ```
 
@@ -129,6 +139,71 @@ const myAgent: Agent = {
 await login();
 await start(myAgent);
 ```
+
+### 流式回复（Streaming）
+
+在 Agent 上实现 `chatStream` 方法，SDK 会自动使用微信的 GENERATING → FINISH 协议流式更新消息气泡：
+
+```typescript
+import { login, start, type Agent } from "weixin-agent-sdk";
+
+const streamingAgent: Agent = {
+  // chatStream 优先于 chat，两者都实现时 SDK 只调用 chatStream
+  async *chatStream(req) {
+    let acc = "";
+    for await (const delta of myLLM.stream(req.text)) {
+      acc += delta;
+      yield { text: acc };   // 每次 yield 传递截止当前的完整文本（非增量）
+    }
+  },
+  // 保留 chat 作为 fallback（非流式客户端等场景）
+  async chat(req) {
+    return { text: await myLLM.complete(req.text) };
+  },
+};
+
+await login();
+await start(streamingAgent);
+```
+
+### 一次回复多条消息
+
+在 `ChatResponse` 中返回 `messages` 数组，SDK 会按顺序逐条发送：
+
+```typescript
+const agent: Agent = {
+  async chat(req) {
+    return {
+      messages: [
+        { text: "这是第一条消息" },
+        { media: { type: "image", url: "/tmp/chart.png" } },
+        { text: "以上是本次报告，如有疑问请继续提问。" },
+      ],
+    };
+  },
+};
+```
+
+### 主动推送消息
+
+通过 `start()` 的 `onReady` 回调获取 `MessageSender`，可在任意时刻向用户主动发消息：
+
+```typescript
+await start(agent, {
+  onReady(sender) {
+    // 每小时发送一次提醒
+    setInterval(async () => {
+      try {
+        await sender.send(userId, { text: "⏰ 每小时提醒：系统运行正常" });
+      } catch (err) {
+        console.error("推送失败:", err);
+      }
+    }, 3_600_000);
+  },
+});
+```
+
+> **注意：** `sender.send()` 需要目标用户在当前进程启动后**至少向 bot 发过一条消息**，否则抛出错误（SDK 尚未获取到该用户的 context token）。
 
 ### OpenAI 示例
 
@@ -177,6 +252,9 @@ OPENAI_API_KEY=sk-xxx pnpm run start -w packages/example-openai
 | 文件 | 返回 `{ media: { type: "file", url: "/path/to/doc.pdf" } }` |
 | 文本 + 媒体 | `text` 和 `media` 同时返回，文本作为附带说明发送 |
 | 远程图片 | `url` 填 HTTPS 链接，SDK 自动下载后上传到微信 CDN |
+| 多条消息 | 返回 `{ messages: [...] }`，按顺序逐条发送 |
+| 流式回复 | 实现 `Agent.chatStream()`，气泡内容实时更新 |
+| 主动推送 | 通过 `start()` 的 `onReady` 回调获取 `MessageSender` |
 
 ## 内置斜杠命令
 
