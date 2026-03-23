@@ -110,16 +110,18 @@ export async function processOneMessage(
 
   // --- Slash commands ---
   if (textBody.startsWith("/")) {
+    const conversationId = full.from_user_id ?? "";
     const slashResult = await handleSlashCommand(
       textBody,
       {
-        to: full.from_user_id ?? "",
+        to: conversationId,
         contextToken: full.context_token,
         baseUrl: deps.baseUrl,
         token: deps.token,
         accountId: deps.accountId,
         log: deps.log,
         errLog: deps.errLog,
+        onClear: () => deps.agent.clearSession?.(conversationId),
       },
       receivedAt,
       full.create_time_ms,

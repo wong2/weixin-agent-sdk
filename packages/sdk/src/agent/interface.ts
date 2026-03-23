@@ -9,6 +9,8 @@
 export interface Agent {
   /** Process a single message and return a reply. */
   chat(request: ChatRequest): Promise<ChatResponse>;
+  /** Clear/reset the session for a given conversation. */
+  clearSession?(conversationId: string): void;
 }
 
 export interface ChatRequest {

@@ -4,6 +4,7 @@
  * 支持的指令：
  * - /echo <message>         直接回复消息（不经过 AI），并附带通道耗时统计
  * - /toggle-debug           开关 debug 模式，启用后每条 AI 回复追加全链路耗时
+ * - /clear                  清除当前会话，重新开始对话
  */
 import type { WeixinApiOptions } from "../api/api.js";
 import { logger } from "../util/logger.js";
@@ -24,6 +25,8 @@ export interface SlashCommandContext {
   accountId: string;
   log: (msg: string) => void;
   errLog: (msg: string) => void;
+  /** Called when /clear is invoked to reset the agent session. */
+  onClear?: () => void;
 }
 
 /** 发送回复消息 */
@@ -93,6 +96,11 @@ export async function handleSlashCommand(
             ? "Debug 模式已开启"
             : "Debug 模式已关闭",
         );
+        return { handled: true };
+      }
+      case "/clear": {
+        ctx.onClear?.();
+        await sendReply(ctx, "✅ 会话已清除，重新开始对话");
         return { handled: true };
       }
       default:
