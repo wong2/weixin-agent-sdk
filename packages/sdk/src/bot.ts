@@ -129,7 +129,6 @@ export function isLoggedIn(): boolean {
  *
  * - `sendMessage(text)` — proactively send a text message to the logged-in user.
  * - `sendMessage(response)` — send a ChatResponse (text and/or media).
- * - `stop()` — stop the bot.
  * - `promise` — resolves when the bot stops (for `await`).
  */
 export class Bot {
@@ -141,7 +140,6 @@ export class Bot {
   private readonly _cdnBaseUrl: string;
   private readonly _token?: string;
   private readonly _userId: string;
-  private readonly _abortController: AbortController;
 
   /** @internal */
   constructor(params: {
@@ -150,7 +148,6 @@ export class Bot {
     cdnBaseUrl: string;
     token?: string;
     userId: string;
-    abortController: AbortController;
     monitorPromise: Promise<void>;
   }) {
     this._accountId = params.accountId;
@@ -158,13 +155,7 @@ export class Bot {
     this._cdnBaseUrl = params.cdnBaseUrl;
     this._token = params.token;
     this._userId = params.userId;
-    this._abortController = params.abortController;
     this.promise = params.monitorPromise;
-  }
-
-  /** Stop the bot. */
-  stop(): void {
-    this._abortController.abort();
   }
 
   /**
@@ -230,8 +221,8 @@ export class Bot {
 /**
  * Start the bot — long-polls for new messages and dispatches them to the agent.
  *
- * Returns a `Bot` instance. Use `bot.promise` to await completion, `bot.stop()`
- * to stop, and `bot.sendMessage()` to proactively send messages.
+ * Returns a `Bot` instance. Use `bot.promise` to await completion, and
+ * `bot.sendMessage()` to proactively send messages.
  */
 export function start(agent: Agent, opts?: StartOptions): Bot {
   const log = opts?.log ?? console.log;
@@ -266,18 +257,13 @@ export function start(agent: Agent, opts?: StartOptions): Bot {
 
   log(`[weixin] 启动 bot, account=${account.accountId}`);
 
-  const abortController = new AbortController();
-  if (opts?.abortSignal) {
-    opts.abortSignal.addEventListener("abort", () => abortController.abort(), { once: true });
-  }
-
   const monitorPromise = monitorWeixinProvider({
     baseUrl: account.baseUrl,
     cdnBaseUrl: account.cdnBaseUrl,
     token: account.token,
     accountId: account.accountId,
     agent,
-    abortSignal: abortController.signal,
+    abortSignal: opts?.abortSignal,
     log,
   });
 
@@ -287,7 +273,6 @@ export function start(agent: Agent, opts?: StartOptions): Bot {
     cdnBaseUrl: account.cdnBaseUrl,
     token: account.token,
     userId,
-    abortController,
     monitorPromise,
   });
 }
