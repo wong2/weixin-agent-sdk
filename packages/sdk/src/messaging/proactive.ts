@@ -3,6 +3,7 @@ import path from "node:path";
 import type { ChatResponse } from "../agent/interface.js";
 import {
   listWeixinAccountIds,
+  loadWeixinAccount,
   resolveWeixinAccount,
 } from "../auth/accounts.js";
 import { downloadRemoteImageToTemp } from "../cdn/upload.js";
@@ -17,14 +18,14 @@ export type SendMessageOptions = {
 };
 
 /**
- * Proactively send a message to a WeChat user outside the normal reply loop.
+ * Proactively send a message to the logged-in WeChat user outside the normal
+ * reply loop.
  *
  * Requires `start()` to be running so that a `context_token` has been cached
- * for the target user (the user must have sent at least one message previously).
+ * (the user must have sent at least one message previously).
  * The token is valid for approximately 24 hours.
  */
 export async function sendMessage(
-  userId: string,
   response: ChatResponse,
   opts?: SendMessageOptions,
 ): Promise<void> {
@@ -42,12 +43,20 @@ export async function sendMessage(
     throw new Error(`账号 ${accountId} 未配置 (缺少 token)，请先运行 login()`);
   }
 
-  // 2. Look up cached context token
+  // 2. Resolve userId from stored account data
+  const accountData = loadWeixinAccount(account.accountId);
+  const userId = accountData?.userId;
+  if (!userId) {
+    throw new Error(
+      `账号 ${accountId} 没有关联的用户 ID，请重新运行 login()`,
+    );
+  }
+
+  // 3. Look up cached context token
   const contextToken = getContextToken(account.accountId, userId);
   if (!contextToken) {
     throw new Error(
-      `没有找到用户 "${userId}" 的 context_token，` +
-        `该用户需要在 start() 运行期间至少发送过一条消息`,
+      `没有找到 context_token，需要在 start() 运行期间至少收到过一条消息`,
     );
   }
 
@@ -57,7 +66,7 @@ export async function sendMessage(
     contextToken,
   };
 
-  // 3. Send media or text (mirrors process-message.ts logic)
+  // 4. Send media or text (mirrors process-message.ts logic)
   if (response.media) {
     let filePath: string;
     const mediaUrl = response.media.url;
