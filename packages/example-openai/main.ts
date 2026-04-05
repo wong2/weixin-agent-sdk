@@ -41,15 +41,16 @@ async function main() {
         systemPrompt: process.env.SYSTEM_PROMPT,
       });
 
+      const bot = start(agent);
+
       // Graceful shutdown
-      const ac = new AbortController();
       process.on("SIGINT", () => {
         console.log("\n正在停止...");
-        ac.abort();
+        bot.stop();
       });
-      process.on("SIGTERM", () => ac.abort());
+      process.on("SIGTERM", () => bot.stop());
 
-      await start(agent, { abortSignal: ac.signal });
+      await bot.promise;
       break;
     }
 
