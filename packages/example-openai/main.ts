@@ -49,8 +49,7 @@ async function main() {
       });
       process.on("SIGTERM", () => ac.abort());
 
-      const bot = start(agent, { abortSignal: ac.signal });
-      await bot.promise;
+      await start(agent, { abortSignal: ac.signal });
       break;
     }
 

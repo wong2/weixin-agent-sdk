@@ -125,16 +125,12 @@ export function isLoggedIn(): boolean {
 }
 
 /**
- * A running bot instance. Returned by `start()`.
+ * A running bot instance — provides proactive messaging capability.
  *
- * - `sendMessage(text)` — proactively send a text message to the logged-in user.
+ * - `sendMessage(text)` — send a text message to the logged-in user.
  * - `sendMessage(response)` — send a ChatResponse (text and/or media).
- * - `promise` — resolves when the bot stops (for `await`).
  */
 export class Bot {
-  /** Resolves when the monitor loop ends. */
-  readonly promise: Promise<void>;
-
   private readonly _accountId: string;
   private readonly _baseUrl: string;
   private readonly _cdnBaseUrl: string;
@@ -148,14 +144,12 @@ export class Bot {
     cdnBaseUrl: string;
     token?: string;
     userId: string;
-    monitorPromise: Promise<void>;
   }) {
     this._accountId = params.accountId;
     this._baseUrl = params.baseUrl;
     this._cdnBaseUrl = params.cdnBaseUrl;
     this._token = params.token;
     this._userId = params.userId;
-    this.promise = params.monitorPromise;
   }
 
   /**
@@ -220,11 +214,11 @@ export class Bot {
 
 /**
  * Start the bot — long-polls for new messages and dispatches them to the agent.
+ * Blocks until the abort signal fires or an unrecoverable error occurs.
  *
- * Returns a `Bot` instance. Use `bot.promise` to await completion, and
- * `bot.sendMessage()` to proactively send messages.
+ * Returns a `Bot` instance with `sendMessage()` for proactive messaging.
  */
-export function start(agent: Agent, opts?: StartOptions): Bot {
+export async function start(agent: Agent, opts?: StartOptions): Promise<Bot> {
   const log = opts?.log ?? console.log;
 
   // Resolve account
@@ -257,7 +251,15 @@ export function start(agent: Agent, opts?: StartOptions): Bot {
 
   log(`[weixin] 启动 bot, account=${account.accountId}`);
 
-  const monitorPromise = monitorWeixinProvider({
+  const bot = new Bot({
+    accountId: account.accountId,
+    baseUrl: account.baseUrl,
+    cdnBaseUrl: account.cdnBaseUrl,
+    token: account.token,
+    userId,
+  });
+
+  await monitorWeixinProvider({
     baseUrl: account.baseUrl,
     cdnBaseUrl: account.cdnBaseUrl,
     token: account.token,
@@ -267,12 +269,5 @@ export function start(agent: Agent, opts?: StartOptions): Bot {
     log,
   });
 
-  return new Bot({
-    accountId: account.accountId,
-    baseUrl: account.baseUrl,
-    cdnBaseUrl: account.cdnBaseUrl,
-    token: account.token,
-    userId,
-    monitorPromise,
-  });
+  return bot;
 }
