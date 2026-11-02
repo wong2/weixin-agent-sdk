@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Breaking changes 与升级注意事项
+
+- **运行环境**：`weixin-agent-sdk` 和 `weixin-acp` 的最低 Node.js 版本均从 `22` 提升至 `22.13.0`，使用 Node.js 22.0～22.12 的应用需要先升级运行环境。
+- **发送错误处理**：HTTP 200 但服务端返回非零 `ret` 时，`bot.sendMessage()` 现在会 reject，自动回复流程也会进入错误处理；此前此类失败可能被当作成功。调用方应捕获发送异常，尤其是定时任务中的主动发送。
+- **非交互登录**：服务端要求验证码时，交互 CLI 会提示输入；非交互应用需要通过 `login({ onVerifyCode })` 提供验证码，并处理回调中的取消信号，否则登录会明确失败。
+- **默认持久化**：context token 会落盘并在重启后恢复；引用缓存默认开启，文字保留 30 天、每账号最多 10,000 条，附件保留 7 天、每账号最多 256 MiB、单文件最多 25 MiB。可通过 `start(agent, { quoteCache: { enabled: false } })` 关闭引用缓存；该选项不关闭 context token 持久化。
+- **Agent 输入变化**：按 ID 还原的引用及局部引用会补入 `request.text`；未缓存或附件过期时也会加入文字提示。依赖完整输入文本严格匹配的应用需要适配。结构化引用通过可选的 `request.quote` 提供。
+- **启停时序**：启动和停止新增状态通知，请求失败不阻断运行，但可能增加等待时间；停止通知使用独立的 10 秒默认超时，因此取消长轮询后 `bot.wait()` 可能继续等待通知结束。
+- **保持兼容的部分**：`Agent.chat()`、`start()`、`bot.sendMessage()` 的现有调用方式和返回类型保持不变；新增公开字段均可选。默认仍为 `plain` 输出，只有显式指定 `outputFormat: "markdown"` 或 CLI 的 `--output-format markdown` 才启用 Markdown 模式。
+
 ### weixin-agent-sdk
 
 - **feat**: 同步 `@tencent-weixin/openclaw-weixin@2.4.10` 的 SDK 相关能力：验证码与已绑定登录、context token 持久化、无损消息 ID、引用文字/附件 SQLite 缓存、生命周期通知、应用标识及网络错误分类
