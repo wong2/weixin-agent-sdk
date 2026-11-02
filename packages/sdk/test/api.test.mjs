@@ -1,4 +1,9 @@
 import "./test-state.mjs";
+import pkg from "../package.json" with { type: "json" };
+
+const encodedVersion = pkg.version
+  .split(".")
+  .reduce((value, part) => (value << 8) | Number(part), 0);
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
@@ -28,11 +33,14 @@ test("send rejects service errors even on HTTP 200", async (t) => {
 test("request metadata, headers and lossless send result", async (t) => {
   t.mock.method(globalThis, "fetch", async (_url, options) => {
     assert.equal(options.headers["iLink-App-Id"], "bot");
-    assert.equal(options.headers["iLink-App-ClientVersion"], "1280");
+    assert.equal(
+      options.headers["iLink-App-ClientVersion"],
+      String(encodedVersion),
+    );
     assert.equal(options.headers["Content-Length"], undefined);
     assert.equal(options.headers.Authorization, "Bearer test-token");
     assert.deepEqual(JSON.parse(options.body).base_info, {
-      channel_version: "0.5.0",
+      channel_version: pkg.version,
       bot_agent: "MyApp/1.0 (test)",
     });
     return new Response('{"ret":0,"message_id":18446744073709551615}');
@@ -44,8 +52,8 @@ test("request metadata, headers and lossless send result", async (t) => {
     body: {},
   });
   assert.equal(response.message_id, "18446744073709551615");
-  assert.equal(buildBaseInfo().channel_version, "0.5.0");
-  assert.equal(sanitizeBotAgent("bad\nvalue"), "weixin-agent-sdk/0.5.0");
+  assert.equal(buildBaseInfo().channel_version, pkg.version);
+  assert.equal(sanitizeBotAgent("bad\nvalue"), `${pkg.name}/${pkg.version}`);
   assert.ok(sanitizeBotAgent(Array(100).fill("App/1").join(" ")).length <= 256);
 });
 

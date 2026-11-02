@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## weixin-agent-sdk 0.6.0 / weixin-acp 0.7.0 (2026-11-02)
 
 ### Breaking changes 与升级注意事项
 
