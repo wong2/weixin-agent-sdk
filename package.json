@@ -1,6 +1,7 @@
 {
   "private": true,
   "scripts": {
+    "test": "pnpm --filter weixin-agent-sdk test",
     "typecheck": "pnpm -r run typecheck"
   }
 }

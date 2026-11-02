@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### weixin-agent-sdk
+
+- **fix**: Markdown 链接转换为标题和换行后的完整 URL，标题与 URL 相同时仅保留一次；支持链接地址中的嵌套括号，并避免格式清理破坏 URL 中的下划线等字符
+
 ## 0.5.0 (2026-04-19)
 
 ### weixin-agent-sdk

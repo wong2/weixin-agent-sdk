@@ -25,6 +25,7 @@
     "qrcode-terminal": "0.12.0"
   },
   "scripts": {
+    "test": "tsc --noEmit false --declaration false --outDir .test-dist && node --test test/*.test.mjs",
     "build": "tsdown",
     "dev": "tsdown --watch",
     "prepublishOnly": "pnpm run build",
