@@ -22,6 +22,7 @@ export interface SlashCommandContext {
   contextToken?: string;
   baseUrl: string;
   token?: string;
+  botAgent?: string;
   accountId: string;
   log: (msg: string) => void;
   errLog: (msg: string) => void;
@@ -30,10 +31,14 @@ export interface SlashCommandContext {
 }
 
 /** 发送回复消息 */
-async function sendReply(ctx: SlashCommandContext, text: string): Promise<void> {
+async function sendReply(
+  ctx: SlashCommandContext,
+  text: string,
+): Promise<void> {
   const opts: WeixinApiOptions & { contextToken?: string } = {
     baseUrl: ctx.baseUrl,
     token: ctx.token,
+    botAgent: ctx.botAgent,
     contextToken: ctx.contextToken,
   };
   await sendMessageWeixin({ to: ctx.to, text, opts });
@@ -78,7 +83,10 @@ export async function handleSlashCommand(
   }
 
   const spaceIdx = trimmed.indexOf(" ");
-  const command = spaceIdx === -1 ? trimmed.toLowerCase() : trimmed.slice(0, spaceIdx).toLowerCase();
+  const command =
+    spaceIdx === -1
+      ? trimmed.toLowerCase()
+      : trimmed.slice(0, spaceIdx).toLowerCase();
   const args = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1);
 
   logger.info(`[weixin] Slash command: ${command}, args: ${args.slice(0, 50)}`);
@@ -90,12 +98,7 @@ export async function handleSlashCommand(
         return { handled: true };
       case "/toggle-debug": {
         const enabled = toggleDebugMode(ctx.accountId);
-        await sendReply(
-          ctx,
-          enabled
-            ? "Debug 模式已开启"
-            : "Debug 模式已关闭",
-        );
+        await sendReply(ctx, enabled ? "Debug 模式已开启" : "Debug 模式已关闭");
         return { handled: true };
       }
       case "/clear": {

@@ -24,11 +24,14 @@ export class WeixinConfigManager {
   private cache = new Map<string, ConfigCacheEntry>();
 
   constructor(
-    private apiOpts: { baseUrl: string; token?: string },
+    private apiOpts: { baseUrl: string; token?: string; botAgent?: string },
     private log: (msg: string) => void,
   ) {}
 
-  async getForUser(userId: string, contextToken?: string): Promise<CachedConfig> {
+  async getForUser(
+    userId: string,
+    contextToken?: string,
+  ): Promise<CachedConfig> {
     const now = Date.now();
     const entry = this.cache.get(userId);
     const shouldFetch = !entry || now >= entry.nextFetchAt;
@@ -37,6 +40,7 @@ export class WeixinConfigManager {
       let fetchOk = false;
       try {
         const resp = await getConfig({
+          ...this.apiOpts,
           baseUrl: this.apiOpts.baseUrl,
           token: this.apiOpts.token,
           ilinkUserId: userId,
@@ -55,7 +59,9 @@ export class WeixinConfigManager {
           fetchOk = true;
         }
       } catch (err) {
-        this.log(`[weixin] getConfig failed for ${userId} (ignored): ${String(err)}`);
+        this.log(
+          `[weixin] getConfig failed for ${userId} (ignored): ${String(err)}`,
+        );
       }
       if (!fetchOk) {
         const prevDelay = entry?.retryDelayMs ?? CONFIG_CACHE_INITIAL_RETRY_MS;

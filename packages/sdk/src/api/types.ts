@@ -6,6 +6,7 @@
 /** Common request metadata attached to every CGI request. */
 export interface BaseInfo {
   channel_version?: string;
+  bot_agent?: string;
 }
 
 /** proto: UploadMediaType */
@@ -129,9 +130,19 @@ export interface VideoItem {
   thumb_width?: number;
 }
 
+export interface PartialText {
+  start: string;
+  end: string;
+  startindex: number;
+  endindex: number;
+  quotemd5: string;
+}
+
 export interface RefMessage {
   message_item?: MessageItem;
   title?: string; // 摘要
+  svr_id?: string;
+  partial_text?: PartialText;
 }
 
 export interface MessageItem {
@@ -151,7 +162,8 @@ export interface MessageItem {
 /** Unified message (proto: WeixinMessage). Replaces the old split Message + MessageContent + FullMessage. */
 export interface WeixinMessage {
   seq?: number;
-  message_id?: number;
+  /** uint64 parsed losslessly from the wire. */
+  message_id?: string;
   from_user_id?: string;
   to_user_id?: string;
   client_id?: string;
@@ -195,7 +207,18 @@ export interface SendMessageReq {
 }
 
 export interface SendMessageResp {
-  // empty
+  message_id?: string;
+  ret?: number;
+  errmsg?: string;
+}
+
+export interface NotifyStartResp {
+  ret?: number;
+  errmsg?: string;
+}
+export interface NotifyStopResp {
+  ret?: number;
+  errmsg?: string;
 }
 
 /** Typing status: 1 = typing (default), 2 = cancel typing. */

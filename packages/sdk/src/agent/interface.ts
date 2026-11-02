@@ -6,6 +6,8 @@
  * the returned response back to the user.
  */
 
+import type { OutputFormat } from "../messaging/markdown.js";
+
 export interface Agent {
   /** Process a single message and return a reply. */
   chat(request: ChatRequest): Promise<ChatResponse>;
@@ -14,6 +16,16 @@ export interface Agent {
 }
 
 export interface ChatRequest {
+  /** Lossless provider message identifier. */
+  messageId?: string;
+  /** Resolved quote, also included in text for existing agents. */
+  quote?: {
+    messageId?: string;
+    text: string;
+    partialText?: string;
+    media?: ChatRequest["media"];
+    missing?: boolean;
+  };
   /** Conversation / user identifier. Use this to maintain per-user context. */
   conversationId: string;
   /** Text content of the message. */
@@ -31,7 +43,9 @@ export interface ChatRequest {
 }
 
 export interface ChatResponse {
-  /** Reply text (may contain markdown — will be converted to plain text before sending). */
+  /** Override the bot's default output format for this response. */
+  outputFormat?: OutputFormat;
+  /** Reply text, formatted according to outputFormat (plain by default). */
   text?: string;
   /** Reply media file. */
   media?: {

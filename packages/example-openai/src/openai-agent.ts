@@ -50,23 +50,29 @@ export class OpenAIAgent implements Agent {
       content.push({ type: "text", text: request.text });
     }
 
-    if (request.media?.type === "image") {
-      // Send image as base64 for vision models
-      const imageData = await fs.readFile(request.media.filePath);
-      const base64 = imageData.toString("base64");
-      const mimeType = request.media.mimeType || "image/jpeg";
-      content.push({
-        type: "image_url",
-        image_url: { url: `data:${mimeType};base64,${base64}` },
-      });
-    } else if (request.media) {
-      // Non-image media: describe as text attachment
-      const fileName =
-        request.media.fileName ?? path.basename(request.media.filePath);
-      content.push({
-        type: "text",
-        text: `[Attachment: ${request.media.type} — ${fileName}]`,
-      });
+    const attachments = [request.media, request.quote?.media].filter(
+      (media, index, all): media is NonNullable<ChatRequest["media"]> =>
+        Boolean(media) &&
+        all.findIndex((item) => item?.filePath === media?.filePath) === index,
+    );
+    for (const media of attachments) {
+      if (media.type === "image") {
+        // Send image as base64 for vision models
+        const imageData = await fs.readFile(media.filePath);
+        const base64 = imageData.toString("base64");
+        const mimeType = media.mimeType || "image/jpeg";
+        content.push({
+          type: "image_url",
+          image_url: { url: `data:${mimeType};base64,${base64}` },
+        });
+      } else {
+        // Non-image media: describe as text attachment
+        const fileName = media.fileName ?? path.basename(media.filePath);
+        content.push({
+          type: "text",
+          text: `[Attachment: ${media.type} — ${fileName}]`,
+        });
+      }
     }
 
     if (content.length === 0) {

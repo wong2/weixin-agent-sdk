@@ -13,13 +13,14 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "THIRD_PARTY_NOTICES"
   ],
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "qrcode-terminal": "0.12.0"

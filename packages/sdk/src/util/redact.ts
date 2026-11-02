@@ -15,7 +15,10 @@ export function truncate(s: string | undefined, max: number): string {
  * Redact a token/secret: show only the first few chars + total length.
  * Returns `"(none)"` when absent.
  */
-export function redactToken(token: string | undefined, prefixLen = DEFAULT_TOKEN_PREFIX_LEN): string {
+export function redactToken(
+  token: string | undefined,
+  prefixLen = DEFAULT_TOKEN_PREFIX_LEN,
+): string {
   if (!token) return "(none)";
   if (token.length <= prefixLen) return `****(len=${token.length})`;
   return `${token.slice(0, prefixLen)}…(len=${token.length})`;
@@ -25,10 +28,21 @@ export function redactToken(token: string | undefined, prefixLen = DEFAULT_TOKEN
  * Truncate a JSON body string to `maxLen` chars for safe logging.
  * Appends original length so the reader knows how much was dropped.
  */
-export function redactBody(body: string | undefined, maxLen = DEFAULT_BODY_MAX_LEN): string {
+export function redactBody(
+  body: string | undefined,
+  maxLen = DEFAULT_BODY_MAX_LEN,
+): string {
   if (!body) return "(empty)";
-  if (body.length <= maxLen) return body;
-  return `${body.slice(0, maxLen)}…(truncated, totalLen=${body.length})`;
+  try {
+    body = JSON.stringify(JSON.parse(body), (key, value) =>
+      /token|aes.?key|verify.?code|qrcode|encrypt_query_param/i.test(key)
+        ? "[redacted]"
+        : value,
+    );
+  } catch {
+    return `[non-JSON body, ${body.length} chars]`;
+  }
+  return truncate(body, maxLen);
 }
 
 /**

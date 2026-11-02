@@ -4,7 +4,16 @@
 
 ### weixin-agent-sdk
 
+- **feat**: 同步 `@tencent-weixin/openclaw-weixin@2.4.10` 的 SDK 相关能力：验证码与已绑定登录、context token 持久化、无损消息 ID、引用文字/附件 SQLite 缓存、生命周期通知、应用标识及网络错误分类
+- **feat**: 新增 `StartOptions.outputFormat` 与单条回复 `outputFormat`，支持保留部分 Markdown；默认仍为纯文本
+- **feat**: 新增 `beforeSend` / `afterSend` 应用消息 hooks，自动回复和主动发送共用发送流程
+- **fix**: 校验发送接口业务返回值，服务端拒绝发送时抛错；移除手动 Content-Length，构建时嵌入版本号，并补齐应用请求头
+- **change**: Node.js 最低版本提升至 `22.13.0`；引用缓存默认启用，可配置保留时间、容量或关闭；此次不包含工具调用进度
 - **fix**: Markdown 链接转换为标题和换行后的完整 URL，标题与 URL 相同时仅保留一次；支持链接地址中的嵌套括号，并避免格式清理破坏 URL 中的下划线等字符
+
+### weixin-acp
+
+- **feat**: 新增 `--output-format plain|markdown`，并支持同时向 Agent 提供当前附件和引用附件
 
 ## 0.5.0 (2026-04-19)
 

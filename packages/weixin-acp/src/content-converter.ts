@@ -15,12 +15,17 @@ export async function convertRequestToContentBlocks(
     blocks.push({ type: "text", text: request.text });
   }
 
-  if (request.media) {
-    const data = await fs.readFile(request.media.filePath);
+  const attachments = [request.media, request.quote?.media].filter(
+    (media, index, all): media is NonNullable<ChatRequest["media"]> =>
+      Boolean(media) &&
+      all.findIndex((item) => item?.filePath === media?.filePath) === index,
+  );
+  for (const media of attachments) {
+    const data = await fs.readFile(media.filePath);
     const base64 = data.toString("base64");
-    const mimeType = request.media.mimeType;
+    const mimeType = media.mimeType;
 
-    switch (request.media.type) {
+    switch (media.type) {
       case "image":
         blocks.push({ type: "image", data: base64, mimeType });
         break;
@@ -29,7 +34,7 @@ export async function convertRequestToContentBlocks(
         break;
       case "video":
       case "file": {
-        const uri = `file://${request.media.filePath}`;
+        const uri = `file://${media.filePath}`;
         blocks.push({
           type: "resource",
           resource: { uri, blob: base64, mimeType },

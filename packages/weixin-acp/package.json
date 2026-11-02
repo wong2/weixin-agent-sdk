@@ -22,7 +22,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.31.4",

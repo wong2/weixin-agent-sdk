@@ -7,15 +7,16 @@ import type { Agent, ChatRequest } from "../agent/interface.js";
 import { sendTyping } from "../api/api.js";
 import type { WeixinMessage, MessageItem } from "../api/types.js";
 import { MessageItemType, TypingStatus } from "../api/types.js";
-import { downloadRemoteImageToTemp } from "../cdn/upload.js";
 import { downloadMediaFromItem } from "../media/media-download.js";
 import { getExtensionFromMime } from "../media/mime.js";
 import { logger } from "../util/logger.js";
 
-import { setContextToken, bodyFromItemList, isMediaItem } from "./inbound.js";
+import { setContextToken, isMediaItem } from "./inbound.js";
 import { sendWeixinErrorNotice } from "./error-notice.js";
-import { sendWeixinMediaFile } from "./send-media.js";
-import { markdownToPlainText, sendMessageWeixin } from "./send.js";
+import { sendChatResponse, type MessageHooks } from "./outbound.js";
+import type { OutputFormat } from "./markdown.js";
+import type { QuoteStore } from "./quote-store.js";
+import { messageId, messageBody, resolveQuote } from "./quotes.js";
 import { handleSlashCommand } from "./slash-commands.js";
 
 const MEDIA_TEMP_DIR = path.join(os.tmpdir(), "weixin-agent/media");
@@ -44,6 +45,10 @@ async function saveMediaBuffer(
 
 /** Dependencies for processOneMessage. */
 export type ProcessMessageDeps = {
+  outputFormat?: OutputFormat;
+  botAgent?: string;
+  hooks?: MessageHooks;
+  quoteStore?: QuoteStore | null;
   accountId: string;
   agent: Agent;
   baseUrl: string;
@@ -69,19 +74,27 @@ function extractTextBody(itemList?: MessageItem[]): string {
 function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
   if (!itemList?.length) return undefined;
 
-  const hasDownloadableMedia = (m?: { encrypt_query_param?: string; full_url?: string }) =>
-    m?.encrypt_query_param || m?.full_url;
+  const hasDownloadableMedia = (m?: {
+    encrypt_query_param?: string;
+    full_url?: string;
+  }) => m?.encrypt_query_param || m?.full_url;
 
   // Direct media: IMAGE > VIDEO > FILE > VOICE (skip voice with transcription)
   const direct =
     itemList.find(
-      (i) => i.type === MessageItemType.IMAGE && hasDownloadableMedia(i.image_item?.media),
+      (i) =>
+        i.type === MessageItemType.IMAGE &&
+        hasDownloadableMedia(i.image_item?.media),
     ) ??
     itemList.find(
-      (i) => i.type === MessageItemType.VIDEO && hasDownloadableMedia(i.video_item?.media),
+      (i) =>
+        i.type === MessageItemType.VIDEO &&
+        hasDownloadableMedia(i.video_item?.media),
     ) ??
     itemList.find(
-      (i) => i.type === MessageItemType.FILE && hasDownloadableMedia(i.file_item?.media),
+      (i) =>
+        i.type === MessageItemType.FILE &&
+        hasDownloadableMedia(i.file_item?.media),
     ) ??
     itemList.find(
       (i) =>
@@ -112,6 +125,12 @@ export async function processOneMessage(
   const receivedAt = Date.now();
   const textBody = extractTextBody(full.item_list);
 
+  // --- Store context token ---
+  const contextToken = full.context_token;
+  if (contextToken) {
+    setContextToken(deps.accountId, full.from_user_id ?? "", contextToken);
+  }
+
   // --- Slash commands ---
   if (textBody.startsWith("/")) {
     const conversationId = full.from_user_id ?? "";
@@ -122,6 +141,7 @@ export async function processOneMessage(
         contextToken: full.context_token,
         baseUrl: deps.baseUrl,
         token: deps.token,
+        botAgent: deps.botAgent,
         accountId: deps.accountId,
         log: deps.log,
         errLog: deps.errLog,
@@ -131,12 +151,6 @@ export async function processOneMessage(
       full.create_time_ms,
     );
     if (slashResult.handled) return;
-  }
-
-  // --- Store context token ---
-  const contextToken = full.context_token;
-  if (contextToken) {
-    setContextToken(deps.accountId, full.from_user_id ?? "", contextToken);
   }
 
   // --- Download media ---
@@ -152,13 +166,22 @@ export async function processOneMessage(
         label: "inbound",
       });
       if (downloaded.decryptedPicPath) {
-        media = { type: "image", filePath: downloaded.decryptedPicPath, mimeType: "image/*" };
+        media = {
+          type: "image",
+          filePath: downloaded.decryptedPicPath,
+          mimeType: "image/*",
+        };
       } else if (downloaded.decryptedVideoPath) {
-        media = { type: "video", filePath: downloaded.decryptedVideoPath, mimeType: "video/mp4" };
+        media = {
+          type: "video",
+          filePath: downloaded.decryptedVideoPath,
+          mimeType: "video/mp4",
+        };
       } else if (downloaded.decryptedFilePath) {
         media = {
           type: "file",
           filePath: downloaded.decryptedFilePath,
+          fileName: mediaItem.file_item?.file_name,
           mimeType: downloaded.fileMediaType ?? "application/octet-stream",
         };
       } else if (downloaded.decryptedVoicePath) {
@@ -173,11 +196,34 @@ export async function processOneMessage(
     }
   }
 
-  // --- Build ChatRequest ---
+  // Cache the current message, never treating an inline quoted attachment as its own.
+  const id = messageId(full);
+  const ownMedia = full.item_list?.includes(mediaItem!) ? media : undefined;
+  if (id && deps.quoteStore) {
+    try {
+      await deps.quoteStore.put({
+        accountId: deps.accountId,
+        conversationId: full.from_user_id ?? "",
+        messageId: id,
+        direction: "inbound",
+        body: messageBody(full.item_list),
+        createdAt: full.create_time_ms ?? receivedAt,
+        sourceMediaPath: ownMedia?.filePath,
+        mediaMime: ownMedia?.mimeType,
+        mediaName: ownMedia?.fileName,
+      });
+    } catch (err) {
+      logger.warn(`Unable to cache inbound message: ${String(err)}`);
+    }
+  }
+  const quote = resolveQuote(full, deps.accountId, deps.quoteStore);
+  const body = messageBody(full.item_list);
   const request: ChatRequest = {
     conversationId: full.from_user_id ?? "",
-    text: bodyFromItemList(full.item_list),
-    media,
+    messageId: id,
+    text: quote ? `[引用: ${quote.partialText ?? quote.text}]\n${body}` : body,
+    media: media ?? quote?.media,
+    quote,
   };
 
   // --- Typing indicator (start + periodic refresh) ---
@@ -188,6 +234,7 @@ export async function processOneMessage(
     sendTyping({
       baseUrl: deps.baseUrl,
       token: deps.token,
+      botAgent: deps.botAgent,
       body: {
         ilink_user_id: to,
         typing_ticket: deps.typingTicket,
@@ -204,39 +251,34 @@ export async function processOneMessage(
   try {
     const response = await deps.agent.chat(request);
 
-    if (response.media) {
-      let filePath: string;
-      const mediaUrl = response.media.url;
-      if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
-        filePath = await downloadRemoteImageToTemp(
-          mediaUrl,
-          path.join(MEDIA_TEMP_DIR, "outbound"),
-        );
-      } else {
-        filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
-      }
-      await sendWeixinMediaFile({
-        filePath,
+    if (response.text || response.media) {
+      await sendChatResponse(response, {
         to,
-        text: response.text ? markdownToPlainText(response.text) : "",
-        opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken },
+        accountId: deps.accountId,
         cdnBaseUrl: deps.cdnBaseUrl,
-      });
-    } else if (response.text) {
-      await sendMessageWeixin({
-        to,
-        text: markdownToPlainText(response.text),
-        opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken },
+        outputFormat: deps.outputFormat,
+        hooks: deps.hooks,
+        opts: {
+          baseUrl: deps.baseUrl,
+          token: deps.token,
+          contextToken,
+          botAgent: deps.botAgent,
+          accountId: deps.accountId,
+          quoteStore: deps.quoteStore,
+        },
       });
     }
   } catch (err) {
-    logger.error(`processOneMessage: agent or send failed: ${err instanceof Error ? err.stack ?? err.message : JSON.stringify(err)}`);
+    logger.error(
+      `processOneMessage: agent or send failed: ${err instanceof Error ? (err.stack ?? err.message) : JSON.stringify(err)}`,
+    );
     void sendWeixinErrorNotice({
       to,
       contextToken,
       message: `⚠️ 处理消息失败：${err instanceof Error ? err.message : JSON.stringify(err)}`,
       baseUrl: deps.baseUrl,
       token: deps.token,
+      botAgent: deps.botAgent,
       errLog: deps.errLog,
     });
   } finally {
@@ -246,6 +288,7 @@ export async function processOneMessage(
       sendTyping({
         baseUrl: deps.baseUrl,
         token: deps.token,
+        botAgent: deps.botAgent,
         body: {
           ilink_user_id: to,
           typing_ticket: deps.typingTicket,

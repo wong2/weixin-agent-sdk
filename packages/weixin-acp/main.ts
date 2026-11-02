@@ -33,6 +33,13 @@ async function ensureLoggedIn() {
 }
 
 async function startAgent(acpCommand: string, acpArgs: string[] = []) {
+  const separator = process.argv.indexOf("--");
+  const options = process.argv.slice(3, separator < 0 ? undefined : separator);
+  const formatIndex = options.indexOf("--output-format");
+  const outputFormat = formatIndex < 0 ? "plain" : options[formatIndex + 1];
+  if (outputFormat !== "plain" && outputFormat !== "markdown") {
+    throw new Error("--output-format 必须是 plain 或 markdown");
+  }
   await ensureLoggedIn();
 
   const agent = new AcpAgent({ command: acpCommand, args: acpArgs });
@@ -48,7 +55,7 @@ async function startAgent(acpCommand: string, acpArgs: string[] = []) {
     ac.abort();
   });
 
-  return start(agent, { abortSignal: ac.signal });
+  return start(agent, { abortSignal: ac.signal, outputFormat });
 }
 
 async function main() {
@@ -93,6 +100,8 @@ async function main() {
   npx weixin-acp start -- <command> [args...]    使用自定义 agent
 
 示例:
+  npx weixin-acp codex --output-format markdown
+  npx weixin-acp start --output-format markdown -- node ./my-agent.js
   npx weixin-acp start -- node ./my-agent.js`);
 }
 

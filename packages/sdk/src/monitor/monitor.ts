@@ -1,9 +1,20 @@
 import type { Agent } from "../agent/interface.js";
-import { getUpdates } from "../api/api.js";
+import type { OutputFormat } from "../messaging/markdown.js";
+import type { MessageHooks } from "../messaging/outbound.js";
+import type { QuoteStore } from "../messaging/quote-store.js";
+import { getUpdates, classifyFetchError } from "../api/api.js";
 import { WeixinConfigManager } from "../api/config-cache.js";
-import { SESSION_EXPIRED_ERRCODE, pauseSession, getRemainingPauseMs } from "../api/session-guard.js";
+import {
+  STALE_TOKEN_ERRCODE,
+  pauseSession,
+  getRemainingPauseMs,
+} from "../api/session-guard.js";
 import { processOneMessage } from "../messaging/process-message.js";
-import { getSyncBufFilePath, loadGetUpdatesBuf, saveGetUpdatesBuf } from "../storage/sync-buf.js";
+import {
+  getSyncBufFilePath,
+  loadGetUpdatesBuf,
+  saveGetUpdatesBuf,
+} from "../storage/sync-buf.js";
 import { logger } from "../util/logger.js";
 import { redactBody } from "../util/redact.js";
 
@@ -13,6 +24,10 @@ const BACKOFF_DELAY_MS = 30_000;
 const RETRY_DELAY_MS = 2_000;
 
 export type MonitorWeixinOpts = {
+  outputFormat?: OutputFormat;
+  botAgent?: string;
+  hooks?: MessageHooks;
+  quoteStore?: QuoteStore | null;
   baseUrl: string;
   cdnBaseUrl: string;
   token?: string;
@@ -27,7 +42,9 @@ export type MonitorWeixinOpts = {
  * Long-poll loop: getUpdates → process message → call agent → send reply.
  * Runs until aborted.
  */
-export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<void> {
+export async function monitorWeixinProvider(
+  opts: MonitorWeixinOpts,
+): Promise<void> {
   const {
     baseUrl,
     cdnBaseUrl,
@@ -52,12 +69,17 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
   let getUpdatesBuf = previousGetUpdatesBuf ?? "";
 
   if (previousGetUpdatesBuf) {
-    log(`[weixin] resuming from previous sync buf (${getUpdatesBuf.length} bytes)`);
+    log(
+      `[weixin] resuming from previous sync buf (${getUpdatesBuf.length} bytes)`,
+    );
   } else {
     log(`[weixin] no previous sync buf, starting fresh`);
   }
 
-  const configManager = new WeixinConfigManager({ baseUrl, token }, log);
+  const configManager = new WeixinConfigManager(
+    { baseUrl, token, botAgent: opts.botAgent },
+    log,
+  );
 
   let nextTimeoutMs = longPollTimeoutMs ?? DEFAULT_LONG_POLL_TIMEOUT_MS;
   let consecutiveFailures = 0;
@@ -68,11 +90,15 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
         baseUrl,
         token,
         get_updates_buf: getUpdatesBuf,
+        botAgent: opts.botAgent,
         timeoutMs: nextTimeoutMs,
         abortSignal,
       });
 
-      if (resp.longpolling_timeout_ms != null && resp.longpolling_timeout_ms > 0) {
+      if (
+        resp.longpolling_timeout_ms != null &&
+        resp.longpolling_timeout_ms > 0
+      ) {
         nextTimeoutMs = resp.longpolling_timeout_ms;
       }
 
@@ -82,13 +108,14 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
 
       if (isApiError) {
         const isSessionExpired =
-          resp.errcode === SESSION_EXPIRED_ERRCODE || resp.ret === SESSION_EXPIRED_ERRCODE;
+          resp.errcode === STALE_TOKEN_ERRCODE ||
+          resp.ret === STALE_TOKEN_ERRCODE;
 
         if (isSessionExpired) {
           pauseSession(accountId);
           const pauseMs = getRemainingPauseMs(accountId);
           errLog(
-            `[weixin] session expired (errcode ${SESSION_EXPIRED_ERRCODE}), pausing for ${Math.ceil(pauseMs / 60_000)} min. Please run \`npx weixin-acp login\` to re-login.`,
+            `[weixin] token stale (errcode ${STALE_TOKEN_ERRCODE}), pausing for ${Math.ceil(pauseMs / 60_000)} min. Please run \`npx weixin-acp login\` to re-login.`,
           );
           consecutiveFailures = 0;
           await sleep(pauseMs, abortSignal);
@@ -100,7 +127,9 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
           `[weixin] getUpdates failed: ret=${resp.ret} errcode=${resp.errcode} errmsg=${resp.errmsg ?? ""} (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES})`,
         );
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          errLog(`[weixin] ${MAX_CONSECUTIVE_FAILURES} consecutive failures, backing off 30s`);
+          errLog(
+            `[weixin] ${MAX_CONSECUTIVE_FAILURES} consecutive failures, backing off 30s`,
+          );
           consecutiveFailures = 0;
           await sleep(BACKOFF_DELAY_MS, abortSignal);
         } else {
@@ -118,14 +147,22 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
 
       const list = resp.msgs ?? [];
       for (const full of list) {
+        if (abortSignal?.aborted) return;
         aLog.info(
           `inbound: from=${full.from_user_id} types=${full.item_list?.map((i) => i.type).join(",") ?? "none"}`,
         );
 
         const fromUserId = full.from_user_id ?? "";
-        const cachedConfig = await configManager.getForUser(fromUserId, full.context_token);
+        const cachedConfig = await configManager.getForUser(
+          fromUserId,
+          full.context_token,
+        );
 
         await processOneMessage(full, {
+          outputFormat: opts.outputFormat,
+          botAgent: opts.botAgent,
+          hooks: opts.hooks,
+          quoteStore: opts.quoteStore,
           accountId,
           agent,
           baseUrl,
@@ -143,7 +180,7 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
       }
       consecutiveFailures += 1;
       errLog(
-        `[weixin] getUpdates error (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${String(err)}`,
+        `[weixin] getUpdates error (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${String(err)} (${classifyFetchError(err).type})`,
       );
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         consecutiveFailures = 0;
@@ -156,16 +193,11 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
   aLog.info(`Monitor ended`);
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(t);
-        reject(new Error("aborted"));
-      },
-      { once: true },
-    );
-  });
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  try {
+    const { setTimeout } = await import("node:timers/promises");
+    await setTimeout(ms, undefined, { signal });
+  } catch (err) {
+    if (!signal?.aborted) throw err;
+  }
 }

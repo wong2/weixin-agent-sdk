@@ -2,6 +2,7 @@ import { encryptAesEcb } from "./aes-ecb.js";
 import { buildCdnUploadUrl } from "./cdn-url.js";
 import { logger } from "../util/logger.js";
 import { redactUrl } from "../util/redact.js";
+import { classifyFetchError } from "../api/api.js";
 
 /** Maximum retry attempts for CDN upload. */
 const UPLOAD_MAX_RETRIES = 3;
@@ -21,7 +22,15 @@ export async function uploadBufferToCdn(params: {
   label: string;
   aeskey: Buffer;
 }): Promise<{ downloadParam: string }> {
-  const { buf, uploadFullUrl, uploadParam, filekey, cdnBaseUrl, label, aeskey } = params;
+  const {
+    buf,
+    uploadFullUrl,
+    uploadParam,
+    filekey,
+    cdnBaseUrl,
+    label,
+    aeskey,
+  } = params;
   const ciphertext = encryptAesEcb(buf, aeskey);
   const trimmedFull = uploadFullUrl?.trim();
   let cdnUrl: string;
@@ -30,9 +39,13 @@ export async function uploadBufferToCdn(params: {
   } else if (uploadParam) {
     cdnUrl = buildCdnUploadUrl({ cdnBaseUrl, uploadParam, filekey });
   } else {
-    throw new Error(`${label}: CDN upload URL missing (need upload_full_url or upload_param)`);
+    throw new Error(
+      `${label}: CDN upload URL missing (need upload_full_url or upload_param)`,
+    );
   }
-  logger.debug(`${label}: CDN POST url=${redactUrl(cdnUrl)} ciphertextSize=${ciphertext.length}`);
+  logger.debug(
+    `${label}: CDN POST url=${redactUrl(cdnUrl)} ciphertextSize=${ciphertext.length}`,
+  );
 
   let downloadParam: string | undefined;
   let lastError: unknown;
@@ -52,7 +65,8 @@ export async function uploadBufferToCdn(params: {
         throw new Error(`CDN upload client error ${res.status}: ${errMsg}`);
       }
       if (res.status !== 200) {
-        const errMsg = res.headers.get("x-error-message") ?? `status ${res.status}`;
+        const errMsg =
+          res.headers.get("x-error-message") ?? `status ${res.status}`;
         logger.error(
           `${label}: CDN server error attempt=${attempt} status=${res.status} errMsg=${errMsg}`,
         );
@@ -69,11 +83,20 @@ export async function uploadBufferToCdn(params: {
       break;
     } catch (err) {
       lastError = err;
-      if (err instanceof Error && err.message.includes("client error")) throw err;
+      const diagnostic = classifyFetchError(err);
+      logger.error(
+        `${label}: CDN request failed url=${redactUrl(cdnUrl)} type=${diagnostic.type} code=${diagnostic.code ?? "none"}`,
+      );
+      if (err instanceof Error && err.message.includes("client error"))
+        throw err;
       if (attempt < UPLOAD_MAX_RETRIES) {
-        logger.error(`${label}: attempt ${attempt} failed, retrying... err=${String(err)}`);
+        logger.error(
+          `${label}: attempt ${attempt} failed, retrying... err=${String(err)}`,
+        );
       } else {
-        logger.error(`${label}: all ${UPLOAD_MAX_RETRIES} attempts failed err=${String(err)}`);
+        logger.error(
+          `${label}: all ${UPLOAD_MAX_RETRIES} attempts failed err=${String(err)}`,
+        );
       }
     }
   }

@@ -5,6 +5,17 @@ import { generateId } from "../util/random.js";
 import type { MessageItem, SendMessageReq } from "../api/types.js";
 import { MessageItemType, MessageState, MessageType } from "../api/types.js";
 import type { UploadedFileInfo } from "../cdn/upload.js";
+import type { QuoteStore } from "./quote-store.js";
+
+export type SendOptions = WeixinApiOptions & {
+  contextToken?: string;
+  accountId?: string;
+  quoteStore?: QuoteStore | null;
+  sourceMediaPath?: string;
+  mediaMime?: string;
+  mediaName?: string;
+};
+
 export { markdownToPlainText } from "./markdown.js";
 
 export function generateClientId(): string {
@@ -53,11 +64,13 @@ function buildSendMessageReq(params: {
 export async function sendMessageWeixin(params: {
   to: string;
   text: string;
-  opts: WeixinApiOptions & { contextToken?: string };
-}): Promise<{ messageId: string }> {
+  opts: SendOptions;
+}): Promise<{ messageId: string; serverMessageId?: string }> {
   const { to, text, opts } = params;
   if (!opts.contextToken) {
-    logger.error(`sendMessageWeixin: contextToken missing, refusing to send to=${to}`);
+    logger.error(
+      `sendMessageWeixin: contextToken missing, refusing to send to=${to}`,
+    );
     throw new Error("sendMessageWeixin: contextToken is required");
   }
   const clientId = generateClientId();
@@ -68,17 +81,21 @@ export async function sendMessageWeixin(params: {
     clientId,
   });
   try {
-    await sendMessageApi({
+    const response = await sendMessageApi({
+      ...opts,
       baseUrl: opts.baseUrl,
       token: opts.token,
       timeoutMs: opts.timeoutMs,
       body: req,
     });
+    await cacheSentMessage(opts, to, text, response.message_id, false);
+    return { messageId: clientId, serverMessageId: response.message_id };
   } catch (err) {
-    logger.error(`sendMessageWeixin: failed to=${to} clientId=${clientId} err=${String(err)}`);
+    logger.error(
+      `sendMessageWeixin: failed to=${to} clientId=${clientId} err=${String(err)}`,
+    );
     throw err;
   }
-  return { messageId: clientId };
 }
 
 /**
@@ -89,9 +106,9 @@ async function sendMediaItems(params: {
   to: string;
   text: string;
   mediaItem: MessageItem;
-  opts: WeixinApiOptions & { contextToken?: string };
+  opts: SendOptions;
   label: string;
-}): Promise<{ messageId: string }> {
+}): Promise<{ messageId: string; serverMessageId?: string }> {
   const { to, text, mediaItem, opts, label } = params;
 
   const items: MessageItem[] = [];
@@ -101,6 +118,7 @@ async function sendMediaItems(params: {
   items.push(mediaItem);
 
   let lastClientId = "";
+  let serverMessageId: string | undefined;
   for (const item of items) {
     lastClientId = generateClientId();
     const req: SendMessageReq = {
@@ -115,12 +133,21 @@ async function sendMediaItems(params: {
       },
     };
     try {
-      await sendMessageApi({
+      const response = await sendMessageApi({
+        ...opts,
         baseUrl: opts.baseUrl,
         token: opts.token,
         timeoutMs: opts.timeoutMs,
         body: req,
       });
+      serverMessageId = response.message_id;
+      await cacheSentMessage(
+        opts,
+        to,
+        item.text_item?.text ?? "",
+        response.message_id,
+        item.type !== MessageItemType.TEXT,
+      );
     } catch (err) {
       logger.error(
         `${label}: failed to=${to} clientId=${lastClientId} err=${String(err)}`,
@@ -130,7 +157,7 @@ async function sendMediaItems(params: {
   }
 
   logger.debug(`${label}: success to=${to} clientId=${lastClientId}`);
-  return { messageId: lastClientId };
+  return { messageId: lastClientId, serverMessageId };
 }
 
 /**
@@ -146,11 +173,13 @@ export async function sendImageMessageWeixin(params: {
   to: string;
   text: string;
   uploaded: UploadedFileInfo;
-  opts: WeixinApiOptions & { contextToken?: string };
-}): Promise<{ messageId: string }> {
+  opts: SendOptions;
+}): Promise<{ messageId: string; serverMessageId?: string }> {
   const { to, text, uploaded, opts } = params;
   if (!opts.contextToken) {
-    logger.error(`sendImageMessageWeixin: contextToken missing, refusing to send to=${to}`);
+    logger.error(
+      `sendImageMessageWeixin: contextToken missing, refusing to send to=${to}`,
+    );
     throw new Error("sendImageMessageWeixin: contextToken is required");
   }
   logger.debug(
@@ -169,7 +198,13 @@ export async function sendImageMessageWeixin(params: {
     },
   };
 
-  return sendMediaItems({ to, text, mediaItem: imageItem, opts, label: "sendImageMessageWeixin" });
+  return sendMediaItems({
+    to,
+    text,
+    mediaItem: imageItem,
+    opts,
+    label: "sendImageMessageWeixin",
+  });
 }
 
 /**
@@ -181,11 +216,13 @@ export async function sendVideoMessageWeixin(params: {
   to: string;
   text: string;
   uploaded: UploadedFileInfo;
-  opts: WeixinApiOptions & { contextToken?: string };
-}): Promise<{ messageId: string }> {
+  opts: SendOptions;
+}): Promise<{ messageId: string; serverMessageId?: string }> {
   const { to, text, uploaded, opts } = params;
   if (!opts.contextToken) {
-    logger.error(`sendVideoMessageWeixin: contextToken missing, refusing to send to=${to}`);
+    logger.error(
+      `sendVideoMessageWeixin: contextToken missing, refusing to send to=${to}`,
+    );
     throw new Error("sendVideoMessageWeixin: contextToken is required");
   }
 
@@ -201,7 +238,13 @@ export async function sendVideoMessageWeixin(params: {
     },
   };
 
-  return sendMediaItems({ to, text, mediaItem: videoItem, opts, label: "sendVideoMessageWeixin" });
+  return sendMediaItems({
+    to,
+    text,
+    mediaItem: videoItem,
+    opts,
+    label: "sendVideoMessageWeixin",
+  });
 }
 
 /**
@@ -214,11 +257,13 @@ export async function sendFileMessageWeixin(params: {
   text: string;
   fileName: string;
   uploaded: UploadedFileInfo;
-  opts: WeixinApiOptions & { contextToken?: string };
-}): Promise<{ messageId: string }> {
+  opts: SendOptions;
+}): Promise<{ messageId: string; serverMessageId?: string }> {
   const { to, text, fileName, uploaded, opts } = params;
   if (!opts.contextToken) {
-    logger.error(`sendFileMessageWeixin: contextToken missing, refusing to send to=${to}`);
+    logger.error(
+      `sendFileMessageWeixin: contextToken missing, refusing to send to=${to}`,
+    );
     throw new Error("sendFileMessageWeixin: contextToken is required");
   }
   const fileItem: MessageItem = {
@@ -234,5 +279,40 @@ export async function sendFileMessageWeixin(params: {
     },
   };
 
-  return sendMediaItems({ to, text, mediaItem: fileItem, opts, label: "sendFileMessageWeixin" });
+  return sendMediaItems({
+    to,
+    text,
+    mediaItem: fileItem,
+    opts,
+    label: "sendFileMessageWeixin",
+  });
+}
+
+async function cacheSentMessage(
+  opts: SendOptions,
+  to: string,
+  body: string,
+  messageId: string | undefined,
+  media: boolean,
+): Promise<void> {
+  if (!opts.quoteStore || !opts.accountId || !messageId) return;
+  try {
+    await opts.quoteStore.put({
+      accountId: opts.accountId,
+      conversationId: to,
+      messageId,
+      direction: "outbound",
+      body: body || (media ? "[附件]" : ""),
+      createdAt: Date.now(),
+      ...(media
+        ? {
+            sourceMediaPath: opts.sourceMediaPath,
+            mediaMime: opts.mediaMime,
+            mediaName: opts.mediaName,
+          }
+        : {}),
+    });
+  } catch (err) {
+    logger.warn(`Unable to cache sent message: ${String(err)}`);
+  }
 }

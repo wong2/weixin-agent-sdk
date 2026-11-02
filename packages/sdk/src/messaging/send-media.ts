@@ -1,9 +1,17 @@
 import path from "node:path";
-import type { WeixinApiOptions } from "../api/api.js";
+import type { SendOptions } from "./send.js";
 import { logger } from "../util/logger.js";
 import { getMimeFromFilename } from "../media/mime.js";
-import { sendFileMessageWeixin, sendImageMessageWeixin, sendVideoMessageWeixin } from "./send.js";
-import { uploadFileAttachmentToWeixin, uploadFileToWeixin, uploadVideoToWeixin } from "../cdn/upload.js";
+import {
+  sendFileMessageWeixin,
+  sendImageMessageWeixin,
+  sendVideoMessageWeixin,
+} from "./send.js";
+import {
+  uploadFileAttachmentToWeixin,
+  uploadFileToWeixin,
+  uploadVideoToWeixin,
+} from "../cdn/upload.js";
 
 /**
  * Upload a local file and send it as a weixin message, routing by MIME type:
@@ -18,15 +26,23 @@ export async function sendWeixinMediaFile(params: {
   filePath: string;
   to: string;
   text: string;
-  opts: WeixinApiOptions & { contextToken?: string };
+  opts: SendOptions;
   cdnBaseUrl: string;
 }): Promise<{ messageId: string }> {
   const { filePath, to, text, opts, cdnBaseUrl } = params;
   const mime = getMimeFromFilename(filePath);
-  const uploadOpts: WeixinApiOptions = { baseUrl: opts.baseUrl, token: opts.token };
+  const uploadOpts = opts;
+  const sendOpts = {
+    ...opts,
+    sourceMediaPath: filePath,
+    mediaMime: mime,
+    mediaName: opts.mediaName ?? path.basename(filePath),
+  };
 
   if (mime.startsWith("video/")) {
-    logger.info(`[weixin] sendWeixinMediaFile: uploading video filePath=${filePath} to=${to}`);
+    logger.info(
+      `[weixin] sendWeixinMediaFile: uploading video filePath=${filePath} to=${to}`,
+    );
     const uploaded = await uploadVideoToWeixin({
       filePath,
       toUserId: to,
@@ -36,11 +52,13 @@ export async function sendWeixinMediaFile(params: {
     logger.info(
       `[weixin] sendWeixinMediaFile: video upload done filekey=${uploaded.filekey} size=${uploaded.fileSize}`,
     );
-    return sendVideoMessageWeixin({ to, text, uploaded, opts });
+    return sendVideoMessageWeixin({ to, text, uploaded, opts: sendOpts });
   }
 
   if (mime.startsWith("image/")) {
-    logger.info(`[weixin] sendWeixinMediaFile: uploading image filePath=${filePath} to=${to}`);
+    logger.info(
+      `[weixin] sendWeixinMediaFile: uploading image filePath=${filePath} to=${to}`,
+    );
     const uploaded = await uploadFileToWeixin({
       filePath,
       toUserId: to,
@@ -50,11 +68,11 @@ export async function sendWeixinMediaFile(params: {
     logger.info(
       `[weixin] sendWeixinMediaFile: image upload done filekey=${uploaded.filekey} size=${uploaded.fileSize}`,
     );
-    return sendImageMessageWeixin({ to, text, uploaded, opts });
+    return sendImageMessageWeixin({ to, text, uploaded, opts: sendOpts });
   }
 
   // File attachment: pdf, doc, zip, etc.
-  const fileName = path.basename(filePath);
+  const fileName = opts.mediaName ?? path.basename(filePath);
   logger.info(
     `[weixin] sendWeixinMediaFile: uploading file attachment filePath=${filePath} name=${fileName} to=${to}`,
   );
@@ -68,5 +86,11 @@ export async function sendWeixinMediaFile(params: {
   logger.info(
     `[weixin] sendWeixinMediaFile: file upload done filekey=${uploaded.filekey} size=${uploaded.fileSize}`,
   );
-  return sendFileMessageWeixin({ to, text, fileName, uploaded, opts });
+  return sendFileMessageWeixin({
+    to,
+    text,
+    fileName,
+    uploaded,
+    opts: sendOpts,
+  });
 }

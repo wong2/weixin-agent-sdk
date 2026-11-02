@@ -1,5 +1,4 @@
-import os from "node:os";
-import path from "node:path";
+import { createInterface } from "node:readline/promises";
 
 import type { Agent, ChatResponse } from "./agent/interface.js";
 import {
@@ -16,17 +15,31 @@ import {
   DEFAULT_ILINK_BOT_TYPE,
   startWeixinLoginWithQr,
   waitForWeixinLogin,
+  type VerifyCodeHandler,
 } from "./auth/login-qr.js";
-import { downloadRemoteImageToTemp } from "./cdn/upload.js";
 import { getContextToken } from "./messaging/inbound.js";
-import { sendWeixinMediaFile } from "./messaging/send-media.js";
-import { markdownToPlainText, sendMessageWeixin } from "./messaging/send.js";
+import {
+  clearContextTokensForAccount,
+  restoreContextTokens,
+} from "./messaging/context-tokens.js";
+import { sendChatResponse, type MessageHooks } from "./messaging/outbound.js";
+import type { OutputFormat } from "./messaging/markdown.js";
+import {
+  QuoteStore,
+  quoteCacheRoot,
+  resolveQuoteCachePolicy,
+  deleteQuoteCacheForAccount,
+  type QuoteCacheOptions,
+} from "./messaging/quote-store.js";
+import { notifyStart, notifyStop } from "./api/api.js";
 import { monitorWeixinProvider } from "./monitor/monitor.js";
-import { logger } from "./util/logger.js";
-
-const MEDIA_TEMP_DIR = path.join(os.tmpdir(), "weixin-agent/media");
 
 export type LoginOptions = {
+  /** Called when WeChat requests the digits shown on the phone. Defaults to terminal input on a TTY. */
+  onVerifyCode?: VerifyCodeHandler;
+  abortSignal?: AbortSignal;
+  /** Overall login deadline, including QR acquisition and verification (default 8 minutes). */
+  timeoutMs?: number;
   /** Override the API base URL. */
   baseUrl?: string;
   /** Log callback (defaults to console.log). */
@@ -34,6 +47,11 @@ export type LoginOptions = {
 };
 
 export type StartOptions = {
+  /** Plain text remains the default. */
+  outputFormat?: OutputFormat;
+  botAgent?: string;
+  quoteCache?: QuoteCacheOptions;
+  hooks?: MessageHooks;
   /** Account ID to use. Auto-selects the first registered account if omitted. */
   accountId?: string;
   /** AbortSignal to stop the bot. */
@@ -51,12 +69,35 @@ export type StartOptions = {
 export async function login(opts?: LoginOptions): Promise<string> {
   const log = opts?.log ?? console.log;
   const apiBaseUrl = opts?.baseUrl ?? DEFAULT_BASE_URL;
+  const signal = AbortSignal.any([
+    AbortSignal.timeout(opts?.timeoutMs ?? 480_000),
+    ...(opts?.abortSignal ? [opts.abortSignal] : []),
+  ]);
+  const onVerifyCode: VerifyCodeHandler =
+    opts?.onVerifyCode ??
+    (async ({ retry, signal }) => {
+      if (!process.stdin.isTTY)
+        throw new Error("非交互登录需要提供 onVerifyCode 回调");
+      const terminal = createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      try {
+        return await terminal.question(
+          retry ? "验证码不匹配，请重新输入：" : "请输入手机微信显示的数字：",
+          { signal },
+        );
+      } finally {
+        terminal.close();
+      }
+    });
 
   log("正在启动微信扫码登录...");
 
   const startResult = await startWeixinLoginWithQr({
     apiBaseUrl,
     botType: DEFAULT_ILINK_BOT_TYPE,
+    abortSignal: signal,
   });
 
   if (!startResult.qrcodeUrl) {
@@ -67,10 +108,14 @@ export async function login(opts?: LoginOptions): Promise<string> {
   try {
     const qrcodeterminal = await import("qrcode-terminal");
     await new Promise<void>((resolve) => {
-      qrcodeterminal.default.generate(startResult.qrcodeUrl!, { small: true }, (qr: string) => {
-        console.log(qr);
-        resolve();
-      });
+      qrcodeterminal.default.generate(
+        startResult.qrcodeUrl!,
+        { small: true },
+        (qr: string) => {
+          console.log(qr);
+          resolve();
+        },
+      );
     });
   } catch {
     log(`二维码链接: ${startResult.qrcodeUrl}`);
@@ -81,9 +126,24 @@ export async function login(opts?: LoginOptions): Promise<string> {
   const waitResult = await waitForWeixinLogin({
     sessionKey: startResult.sessionKey,
     apiBaseUrl,
-    timeoutMs: 480_000,
+    timeoutMs: opts?.timeoutMs ?? 480_000,
+    onVerifyCode,
     botType: DEFAULT_ILINK_BOT_TYPE,
+    abortSignal: signal,
   });
+
+  if (waitResult.alreadyConnected) {
+    const ids = listWeixinAccountIds();
+    const id = waitResult.accountId
+      ? normalizeAccountId(waitResult.accountId)
+      : ids.length === 1
+        ? ids[0]
+        : undefined;
+    if (!id || !loadWeixinAccount(id)?.token)
+      throw new Error("微信提示已绑定，但无法确定对应的本地账号，请重新登录");
+    log(waitResult.message);
+    return id;
+  }
 
   if (!waitResult.connected || !waitResult.botToken || !waitResult.accountId) {
     throw new Error(waitResult.message);
@@ -110,6 +170,10 @@ export function logout(opts?: { log?: (msg: string) => void }): void {
   if (ids.length === 0) {
     log("当前没有已登录的账号");
     return;
+  }
+  for (const id of ids) {
+    clearContextTokensForAccount(id);
+    deleteQuoteCacheForAccount(id);
   }
   clearAllWeixinAccounts();
   log("✅ 已退出登录");
@@ -138,6 +202,8 @@ export class Bot {
   private readonly _token?: string;
   private readonly _userId: string;
   private readonly _monitorPromise: Promise<void>;
+  private readonly _options: StartOptions;
+  private readonly _quoteStore: Promise<QuoteStore | null>;
 
   /** @internal */
   constructor(params: {
@@ -147,7 +213,11 @@ export class Bot {
     token?: string;
     userId: string;
     monitorPromise: Promise<void>;
+    options?: StartOptions;
+    quoteStore?: Promise<QuoteStore | null>;
   }) {
+    this._options = params.options ?? {};
+    this._quoteStore = params.quoteStore ?? Promise.resolve(null);
     this._accountId = params.accountId;
     this._baseUrl = params.baseUrl;
     this._cdnBaseUrl = params.cdnBaseUrl;
@@ -175,8 +245,8 @@ export class Bot {
    * Accepts either a plain string (sent as text) or a full `ChatResponse`
    * object (text and/or media).
    *
-   * Requires at least one inbound message to have been received so that a
-   * valid `context_token` is cached (tokens are valid for ~24 hours).
+   * Requires a context token from an inbound message. Tokens are restored
+   * across restarts; expiration is determined by the WeChat server.
    */
   async sendMessage(message: string | ChatResponse): Promise<void> {
     const response: ChatResponse =
@@ -185,47 +255,25 @@ export class Bot {
     const contextToken = getContextToken(this._accountId, this._userId);
     if (!contextToken) {
       throw new Error(
-        "没有找到 context_token，需要在 start() 运行期间至少收到过一条消息",
+        "没有找到 context_token，需要至少收到过一条消息（重启后会恢复缓存）",
       );
     }
 
-    const apiOpts = {
-      baseUrl: this._baseUrl,
-      token: this._token,
-      contextToken,
-    };
-
-    if (response.media) {
-      let filePath: string;
-      const mediaUrl = response.media.url;
-      if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
-        filePath = await downloadRemoteImageToTemp(
-          mediaUrl,
-          path.join(MEDIA_TEMP_DIR, "outbound"),
-        );
-      } else {
-        filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
-      }
-      await sendWeixinMediaFile({
-        filePath,
-        to: this._userId,
-        text: response.text ? markdownToPlainText(response.text) : "",
-        opts: apiOpts,
-        cdnBaseUrl: this._cdnBaseUrl,
-      });
-      return;
-    }
-
-    if (response.text) {
-      await sendMessageWeixin({
-        to: this._userId,
-        text: markdownToPlainText(response.text),
-        opts: apiOpts,
-      });
-      return;
-    }
-
-    throw new Error("消息必须包含 text 或 media");
+    await sendChatResponse(response, {
+      to: this._userId,
+      accountId: this._accountId,
+      cdnBaseUrl: this._cdnBaseUrl,
+      outputFormat: this._options.outputFormat,
+      hooks: this._options.hooks,
+      opts: {
+        baseUrl: this._baseUrl,
+        token: this._token,
+        contextToken,
+        botAgent: this._options.botAgent,
+        accountId: this._accountId,
+        quoteStore: await this._quoteStore,
+      },
+    });
   }
 }
 
@@ -253,30 +301,67 @@ export function start(agent: Agent, opts?: StartOptions): Bot {
 
   const account = resolveWeixinAccount(accountId);
   if (!account.configured) {
-    throw new Error(
-      `账号 ${accountId} 未配置 (缺少 token)，请先运行 login`,
-    );
+    throw new Error(`账号 ${accountId} 未配置 (缺少 token)，请先运行 login`);
   }
 
   const accountData = loadWeixinAccount(account.accountId);
   const userId = accountData?.userId;
   if (!userId) {
-    throw new Error(
-      `账号 ${accountId} 没有关联的用户 ID，请重新运行 login`,
-    );
+    throw new Error(`账号 ${accountId} 没有关联的用户 ID，请重新运行 login`);
   }
 
   log(`[weixin] 启动 bot, account=${account.accountId}`);
 
-  const monitorPromise = monitorWeixinProvider({
-    baseUrl: account.baseUrl,
-    cdnBaseUrl: account.cdnBaseUrl,
-    token: account.token,
-    accountId: account.accountId,
-    agent,
-    abortSignal: opts?.abortSignal,
-    log,
+  restoreContextTokens(account.accountId);
+  const quoteStore = QuoteStore.open({
+    policy: resolveQuoteCachePolicy(opts?.quoteCache),
+    rootDir: quoteCacheRoot(account.accountId),
   });
+  const apiOpts = {
+    baseUrl: account.baseUrl,
+    token: account.token,
+    botAgent: opts?.botAgent,
+  };
+  const notify = async (event: "start" | "stop") => {
+    try {
+      const response = await (event === "start" ? notifyStart : notifyStop)({
+        ...apiOpts,
+        abortSignal: event === "start" ? opts?.abortSignal : undefined,
+      });
+      if (response.ret)
+        log(`[weixin] notify ${event} failed: ret=${response.ret}`);
+    } catch (err) {
+      log(`[weixin] notify ${event} failed (ignored): ${String(err)}`);
+    }
+  };
+  const monitorPromise = (async () => {
+    const store = await quoteStore;
+    let started = false;
+    try {
+      if (opts?.abortSignal?.aborted) return;
+      started = true;
+      await notify("start");
+      await monitorWeixinProvider({
+        baseUrl: account.baseUrl,
+        cdnBaseUrl: account.cdnBaseUrl,
+        token: account.token,
+        accountId: account.accountId,
+        agent,
+        abortSignal: opts?.abortSignal,
+        outputFormat: opts?.outputFormat,
+        botAgent: opts?.botAgent,
+        hooks: opts?.hooks,
+        quoteStore: store,
+        log,
+      });
+    } finally {
+      try {
+        if (started) await notify("stop");
+      } finally {
+        store?.close();
+      }
+    }
+  })();
 
   return new Bot({
     accountId: account.accountId,
@@ -285,5 +370,7 @@ export function start(agent: Agent, opts?: StartOptions): Bot {
     token: account.token,
     userId,
     monitorPromise,
+    options: opts,
+    quoteStore,
   });
 }

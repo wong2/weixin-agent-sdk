@@ -3,38 +3,7 @@ import { generateId } from "../util/random.js";
 import type { WeixinMessage, MessageItem } from "../api/types.js";
 import { MessageItemType } from "../api/types.js";
 
-// ---------------------------------------------------------------------------
-// Context token store (in-process cache: accountId+userId → contextToken)
-// ---------------------------------------------------------------------------
-
-/**
- * contextToken is issued per-message by the Weixin getupdates API and must
- * be echoed verbatim in every outbound send. It is not persisted: the monitor
- * loop populates this map on each inbound message, and the outbound adapter
- * reads it back when the agent sends a reply.
- */
-const contextTokenStore = new Map<string, string>();
-
-function contextTokenKey(accountId: string, userId: string): string {
-  return `${accountId}:${userId}`;
-}
-
-/** Store a context token for a given account+user pair. */
-export function setContextToken(accountId: string, userId: string, token: string): void {
-  const k = contextTokenKey(accountId, userId);
-  logger.debug(`setContextToken: key=${k}`);
-  contextTokenStore.set(k, token);
-}
-
-/** Retrieve the cached context token for a given account+user pair. */
-export function getContextToken(accountId: string, userId: string): string | undefined {
-  const k = contextTokenKey(accountId, userId);
-  const val = contextTokenStore.get(k);
-  logger.debug(
-    `getContextToken: key=${k} found=${val !== undefined} storeSize=${contextTokenStore.size}`,
-  );
-  return val;
-}
+export { getContextToken, setContextToken } from "./context-tokens.js";
 
 // ---------------------------------------------------------------------------
 // Message ID generation
@@ -166,6 +135,8 @@ export function weixinMessageToMsgContext(
 }
 
 /** Extract the context_token from an inbound WeixinMsgContext. */
-export function getContextTokenFromMsgContext(ctx: WeixinMsgContext): string | undefined {
+export function getContextTokenFromMsgContext(
+  ctx: WeixinMsgContext,
+): string | undefined {
   return ctx.context_token;
 }

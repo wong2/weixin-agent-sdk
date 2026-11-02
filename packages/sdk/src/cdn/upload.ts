@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { getUploadUrl } from "../api/api.js";
+import { getUploadUrl, classifyFetchError } from "../api/api.js";
+import { redactUrl } from "../util/redact.js";
 import type { WeixinApiOptions } from "../api/api.js";
 import { aesEcbPaddedSize } from "./aes-ecb.js";
 import { uploadBufferToCdn } from "./cdn-upload.js";
@@ -27,18 +28,30 @@ export type UploadedFileInfo = {
  * Download a remote media URL (image, video, file) to a local temp file in destDir.
  * Returns the local file path; extension is inferred from Content-Type / URL.
  */
-export async function downloadRemoteImageToTemp(url: string, destDir: string): Promise<string> {
-  logger.debug(`downloadRemoteImageToTemp: fetching url=${url}`);
-  const res = await fetch(url);
+export async function downloadRemoteImageToTemp(
+  url: string,
+  destDir: string,
+): Promise<string> {
+  logger.debug(`downloadRemoteImageToTemp: fetching url=${redactUrl(url)}`);
+  const res = await fetch(url).catch((err: unknown) => {
+    const diagnostic = classifyFetchError(err);
+    logger.error(
+      `remote media download failed url=${redactUrl(url)} type=${diagnostic.type} code=${diagnostic.code ?? "none"}`,
+    );
+    throw err;
+  });
   if (!res.ok) {
-    const msg = `remote media download failed: ${res.status} ${res.statusText} url=${url}`;
+    const msg = `remote media download failed: ${res.status} ${res.statusText} url=${redactUrl(url)}`;
     logger.error(`downloadRemoteImageToTemp: ${msg}`);
     throw new Error(msg);
   }
   const buf = Buffer.from(await res.arrayBuffer());
   logger.debug(`downloadRemoteImageToTemp: downloaded ${buf.length} bytes`);
   await fs.mkdir(destDir, { recursive: true });
-  const ext = getExtensionFromContentTypeOrUrl(res.headers.get("content-type"), url);
+  const ext = getExtensionFromContentTypeOrUrl(
+    res.headers.get("content-type"),
+    url,
+  );
   const name = tempFileName("weixin-remote", ext);
   const filePath = path.join(destDir, name);
   await fs.writeFile(filePath, buf);
@@ -91,15 +104,16 @@ async function uploadMediaToCdn(params: {
     throw new Error(`${label}: getUploadUrl returned no upload URL`);
   }
 
-  const { downloadParam: downloadEncryptedQueryParam } = await uploadBufferToCdn({
-    buf: plaintext,
-    uploadFullUrl: uploadFullUrl || undefined,
-    uploadParam: uploadParam ?? undefined,
-    filekey,
-    cdnBaseUrl,
-    aeskey,
-    label: `${label}[orig filekey=${filekey}]`,
-  });
+  const { downloadParam: downloadEncryptedQueryParam } =
+    await uploadBufferToCdn({
+      buf: plaintext,
+      uploadFullUrl: uploadFullUrl || undefined,
+      uploadParam: uploadParam ?? undefined,
+      filekey,
+      cdnBaseUrl,
+      aeskey,
+      label: `${label}[orig filekey=${filekey}]`,
+    });
 
   return {
     filekey,
