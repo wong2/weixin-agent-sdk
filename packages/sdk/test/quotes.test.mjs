@@ -130,9 +130,11 @@ test("cache enforces message count, age, individual file and media budgets", asy
   fs.writeFileSync(source, "1234");
   await store.put(input("old", { createdAt: Date.now() - 40 * 86400000 }));
   assert.equal(store.find("account", "user", "old"), null);
+  const createdAt = Date.now() - 1000;
   for (let i = 0; i < 3; i++)
     await store.put(
       input(String(i), {
+        createdAt: createdAt + i,
         sourceMediaPath: source,
         mediaMime: "application/octet-stream",
       }),

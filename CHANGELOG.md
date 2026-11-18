@@ -1,5 +1,12 @@
 # Changelog
 
+## weixin-agent-sdk 0.7.0 (2026-11-18)
+
+- **feat**: Add optional `ChatResponse.typingUntil: Promise<void>` to keep typing active after `chat()` returns without blocking subsequent inbound messages. Either resolution or rejection ends the wait.
+- **fix**: Share one typing renewal loop across ordinary requests and asynchronous waits in each account and conversation. Cancel only after all waits finish, and serialize renewals and cancellation to prevent late renewals from restoring typing.
+- **fix**: Clear renewal timers and best-effort cancel typing when the bot exits or its `abortSignal` fires. Ticket lookup and typing failures are logged without interrupting chat.
+- **docs**: Document asynchronous replies. `bot.sendMessage()` does not end a wait; applications own reply correlation, task timeouts, and completion. Applications that omit the new field retain the existing typing lifecycle.
+
 ## weixin-agent-sdk 0.6.0 / weixin-acp 0.7.0 (2026-11-02)
 
 ### Breaking changes 与升级注意事项
