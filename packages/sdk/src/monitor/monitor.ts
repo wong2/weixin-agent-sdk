@@ -3,7 +3,7 @@ import type { OutputFormat } from "../messaging/markdown.js";
 import type { MessageHooks } from "../messaging/outbound.js";
 import type { QuoteStore } from "../messaging/quote-store.js";
 import { getUpdates, classifyFetchError } from "../api/api.js";
-import { WeixinConfigManager } from "../api/config-cache.js";
+import { TypingManager } from "../messaging/typing.js";
 import {
   STALE_TOKEN_ERRCODE,
   pauseSession,
@@ -76,119 +76,120 @@ export async function monitorWeixinProvider(
     log(`[weixin] no previous sync buf, starting fresh`);
   }
 
-  const configManager = new WeixinConfigManager(
-    { baseUrl, token, botAgent: opts.botAgent },
+  const typing = new TypingManager({
+    baseUrl,
+    token,
+    botAgent: opts.botAgent,
+    abortSignal,
     log,
-  );
+  });
 
   let nextTimeoutMs = longPollTimeoutMs ?? DEFAULT_LONG_POLL_TIMEOUT_MS;
   let consecutiveFailures = 0;
 
-  while (!abortSignal?.aborted) {
-    try {
-      const resp = await getUpdates({
-        baseUrl,
-        token,
-        get_updates_buf: getUpdatesBuf,
-        botAgent: opts.botAgent,
-        timeoutMs: nextTimeoutMs,
-        abortSignal,
-      });
+  try {
+    while (!abortSignal?.aborted) {
+      try {
+        const resp = await getUpdates({
+          baseUrl,
+          token,
+          get_updates_buf: getUpdatesBuf,
+          botAgent: opts.botAgent,
+          timeoutMs: nextTimeoutMs,
+          abortSignal,
+        });
 
-      if (
-        resp.longpolling_timeout_ms != null &&
-        resp.longpolling_timeout_ms > 0
-      ) {
-        nextTimeoutMs = resp.longpolling_timeout_ms;
-      }
+        if (
+          resp.longpolling_timeout_ms != null &&
+          resp.longpolling_timeout_ms > 0
+        ) {
+          nextTimeoutMs = resp.longpolling_timeout_ms;
+        }
 
-      const isApiError =
-        (resp.ret !== undefined && resp.ret !== 0) ||
-        (resp.errcode !== undefined && resp.errcode !== 0);
+        const isApiError =
+          (resp.ret !== undefined && resp.ret !== 0) ||
+          (resp.errcode !== undefined && resp.errcode !== 0);
 
-      if (isApiError) {
-        const isSessionExpired =
-          resp.errcode === STALE_TOKEN_ERRCODE ||
-          resp.ret === STALE_TOKEN_ERRCODE;
+        if (isApiError) {
+          const isSessionExpired =
+            resp.errcode === STALE_TOKEN_ERRCODE ||
+            resp.ret === STALE_TOKEN_ERRCODE;
 
-        if (isSessionExpired) {
-          pauseSession(accountId);
-          const pauseMs = getRemainingPauseMs(accountId);
+          if (isSessionExpired) {
+            pauseSession(accountId);
+            const pauseMs = getRemainingPauseMs(accountId);
+            errLog(
+              `[weixin] token stale (errcode ${STALE_TOKEN_ERRCODE}), pausing for ${Math.ceil(pauseMs / 60_000)} min. Please run \`npx weixin-acp login\` to re-login.`,
+            );
+            consecutiveFailures = 0;
+            await sleep(pauseMs, abortSignal);
+            continue;
+          }
+
+          consecutiveFailures += 1;
           errLog(
-            `[weixin] token stale (errcode ${STALE_TOKEN_ERRCODE}), pausing for ${Math.ceil(pauseMs / 60_000)} min. Please run \`npx weixin-acp login\` to re-login.`,
+            `[weixin] getUpdates failed: ret=${resp.ret} errcode=${resp.errcode} errmsg=${resp.errmsg ?? ""} (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES})`,
           );
-          consecutiveFailures = 0;
-          await sleep(pauseMs, abortSignal);
+          if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            errLog(
+              `[weixin] ${MAX_CONSECUTIVE_FAILURES} consecutive failures, backing off 30s`,
+            );
+            consecutiveFailures = 0;
+            await sleep(BACKOFF_DELAY_MS, abortSignal);
+          } else {
+            await sleep(RETRY_DELAY_MS, abortSignal);
+          }
           continue;
         }
 
+        consecutiveFailures = 0;
+
+        if (resp.get_updates_buf != null && resp.get_updates_buf !== "") {
+          saveGetUpdatesBuf(syncFilePath, resp.get_updates_buf);
+          getUpdatesBuf = resp.get_updates_buf;
+        }
+
+        const list = resp.msgs ?? [];
+        for (const full of list) {
+          if (abortSignal?.aborted) return;
+          aLog.info(
+            `inbound: from=${full.from_user_id} types=${full.item_list?.map((i) => i.type).join(",") ?? "none"}`,
+          );
+
+          await processOneMessage(full, {
+            outputFormat: opts.outputFormat,
+            botAgent: opts.botAgent,
+            hooks: opts.hooks,
+            quoteStore: opts.quoteStore,
+            accountId,
+            agent,
+            baseUrl,
+            cdnBaseUrl,
+            token,
+            typing,
+            log,
+            errLog,
+          });
+        }
+      } catch (err) {
+        if (abortSignal?.aborted) {
+          aLog.info(`Monitor stopped (aborted)`);
+          return;
+        }
         consecutiveFailures += 1;
         errLog(
-          `[weixin] getUpdates failed: ret=${resp.ret} errcode=${resp.errcode} errmsg=${resp.errmsg ?? ""} (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES})`,
+          `[weixin] getUpdates error (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${String(err)} (${classifyFetchError(err).type})`,
         );
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          errLog(
-            `[weixin] ${MAX_CONSECUTIVE_FAILURES} consecutive failures, backing off 30s`,
-          );
           consecutiveFailures = 0;
           await sleep(BACKOFF_DELAY_MS, abortSignal);
         } else {
           await sleep(RETRY_DELAY_MS, abortSignal);
         }
-        continue;
-      }
-
-      consecutiveFailures = 0;
-
-      if (resp.get_updates_buf != null && resp.get_updates_buf !== "") {
-        saveGetUpdatesBuf(syncFilePath, resp.get_updates_buf);
-        getUpdatesBuf = resp.get_updates_buf;
-      }
-
-      const list = resp.msgs ?? [];
-      for (const full of list) {
-        if (abortSignal?.aborted) return;
-        aLog.info(
-          `inbound: from=${full.from_user_id} types=${full.item_list?.map((i) => i.type).join(",") ?? "none"}`,
-        );
-
-        const fromUserId = full.from_user_id ?? "";
-        const cachedConfig = await configManager.getForUser(
-          fromUserId,
-          full.context_token,
-        );
-
-        await processOneMessage(full, {
-          outputFormat: opts.outputFormat,
-          botAgent: opts.botAgent,
-          hooks: opts.hooks,
-          quoteStore: opts.quoteStore,
-          accountId,
-          agent,
-          baseUrl,
-          cdnBaseUrl,
-          token,
-          typingTicket: cachedConfig.typingTicket,
-          log,
-          errLog,
-        });
-      }
-    } catch (err) {
-      if (abortSignal?.aborted) {
-        aLog.info(`Monitor stopped (aborted)`);
-        return;
-      }
-      consecutiveFailures += 1;
-      errLog(
-        `[weixin] getUpdates error (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${String(err)} (${classifyFetchError(err).type})`,
-      );
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        consecutiveFailures = 0;
-        await sleep(BACKOFF_DELAY_MS, abortSignal);
-      } else {
-        await sleep(RETRY_DELAY_MS, abortSignal);
       }
     }
+  } finally {
+    await typing.stop();
   }
   aLog.info(`Monitor ended`);
 }

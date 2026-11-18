@@ -43,6 +43,13 @@ export interface ChatRequest {
 }
 
 export interface ChatResponse {
+  /**
+   * Keep typing after chat() returns until this promise settles, without blocking
+   * subsequent inbound messages. Rejection only ends the wait; it sends no error
+   * notice. The application owns reply correlation, completion, and timeouts.
+   * Local control only: ignored by bot.sendMessage() and never sent to WeChat.
+   */
+  typingUntil?: Promise<void>;
   /** Override the bot's default output format for this response. */
   outputFormat?: OutputFormat;
   /** Reply text, formatted according to outputFormat (plain by default). */

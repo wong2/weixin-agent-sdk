@@ -4,9 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import type { Agent, ChatRequest } from "../agent/interface.js";
-import { sendTyping } from "../api/api.js";
 import type { WeixinMessage, MessageItem } from "../api/types.js";
-import { MessageItemType, TypingStatus } from "../api/types.js";
+import { MessageItemType } from "../api/types.js";
 import { downloadMediaFromItem } from "../media/media-download.js";
 import { getExtensionFromMime } from "../media/mime.js";
 import { logger } from "../util/logger.js";
@@ -18,6 +17,7 @@ import type { OutputFormat } from "./markdown.js";
 import type { QuoteStore } from "./quote-store.js";
 import { messageId, messageBody, resolveQuote } from "./quotes.js";
 import { handleSlashCommand } from "./slash-commands.js";
+import type { TypingManager } from "./typing.js";
 
 const MEDIA_TEMP_DIR = path.join(os.tmpdir(), "weixin-agent/media");
 
@@ -54,7 +54,7 @@ export type ProcessMessageDeps = {
   baseUrl: string;
   cdnBaseUrl: string;
   token?: string;
-  typingTicket?: string;
+  typing?: TypingManager;
   log: (msg: string) => void;
   errLog: (msg: string) => void;
 };
@@ -226,30 +226,20 @@ export async function processOneMessage(
     quote,
   };
 
-  // --- Typing indicator (start + periodic refresh) ---
+  // Hold ordinary typing through chat() and automatic reply delivery.
   const to = full.from_user_id ?? "";
-  let typingTimer: ReturnType<typeof setInterval> | undefined;
-  const startTyping = () => {
-    if (!deps.typingTicket) return;
-    sendTyping({
-      baseUrl: deps.baseUrl,
-      token: deps.token,
-      botAgent: deps.botAgent,
-      body: {
-        ilink_user_id: to,
-        typing_ticket: deps.typingTicket,
-        status: TypingStatus.TYPING,
-      },
-    }).catch(() => {});
-  };
-  if (deps.typingTicket) {
-    startTyping();
-    typingTimer = setInterval(startTyping, 10_000);
-  }
+  const releaseTyping = deps.typing?.acquire(to, contextToken);
 
   // --- Call agent & send reply ---
   try {
     const response = await deps.agent.chat(request);
+
+    if (response.typingUntil) {
+      const releaseAsyncTyping = deps.typing?.acquire(to, contextToken) ?? (() => {});
+      // Attach both handlers before sending anything. Never await this promise
+      // in the serial inbound loop, even when automatic text/media is also sent.
+      void response.typingUntil.then(releaseAsyncTyping, releaseAsyncTyping);
+    }
 
     if (response.text || response.media) {
       await sendChatResponse(response, {
@@ -282,19 +272,6 @@ export async function processOneMessage(
       errLog: deps.errLog,
     });
   } finally {
-    // --- Typing indicator (cancel) ---
-    if (typingTimer) clearInterval(typingTimer);
-    if (deps.typingTicket) {
-      sendTyping({
-        baseUrl: deps.baseUrl,
-        token: deps.token,
-        botAgent: deps.botAgent,
-        body: {
-          ilink_user_id: to,
-          typing_ticket: deps.typingTicket,
-          status: TypingStatus.CANCEL,
-        },
-      }).catch(() => {});
-    }
+    releaseTyping?.();
   }
 }

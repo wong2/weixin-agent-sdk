@@ -16,6 +16,7 @@ import type {
   SendMessageReq,
   SendMessageResp,
   SendTypingReq,
+  SendTypingResp,
   GetConfigResp,
 } from "./types.js";
 
@@ -599,7 +600,7 @@ export async function getConfig(
 export async function sendTyping(
   params: WeixinApiOptions & { body: SendTypingReq },
 ): Promise<void> {
-  await apiPostFetch({
+  const rawText = await apiPostFetch({
     baseUrl: params.baseUrl,
     endpoint: "ilink/bot/sendtyping",
     body: JSON.stringify({
@@ -610,6 +611,10 @@ export async function sendTyping(
     timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
     label: "sendTyping",
   });
+  const resp: SendTypingResp = JSON.parse(rawText);
+  if (resp.ret && resp.ret !== 0) {
+    throw new Error(`sendTyping ret=${resp.ret} errmsg=${resp.errmsg ?? "(none)"}`);
+  }
 }
 
 /**

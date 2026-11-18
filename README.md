@@ -89,6 +89,7 @@ interface ChatRequest {
 }
 
 interface ChatResponse {
+  typingUntil?: Promise<void>;    // chat() 返回后继续 typing，直到 Promise settle
   text?: string;
   outputFormat?: "plain" | "markdown"; // 覆盖 start() 的默认输出格式
   media?: {                       // 回复媒体
@@ -98,6 +99,31 @@ interface ChatResponse {
   };
 }
 ```
+
+### 异步回复与 typing
+
+如果 `chat()` 只提交任务、实际回复通过后端订阅事件到达，可以返回 `typingUntil`：
+
+```typescript
+async chat(request) {
+  const pendingReply = createPendingReply(request); // 业务方维护请求与回复的关联
+  await backend.sendMessage(request.text);
+  return { typingUntil: pendingReply.finished };
+}
+
+// 独立的回复订阅中，可以发送进度、分段正文或附件。
+try {
+  await bot.sendMessage(reply);
+} finally {
+  pendingReply.finish(); // 所有回复发送完成后，由业务方结束等待
+}
+```
+
+SDK 不会等待 `typingUntil` 才处理下一条入站消息，并按现有的 10 秒间隔续期。同一账号、同一会话的普通请求和异步等待共用一个续期循环；全部请求的 `chat()`、自动回复发送和异步等待结束后才取消 typing。未提供该字段时保持原有生命周期。
+
+Promise resolve 或 reject 都结束等待；reject 不会自动发送错误消息。`bot.sendMessage()` 不会结束等待，`typingUntil` 仅用于本地控制，不会发送到微信。bot 退出或 `abortSignal` 触发时会清理续期定时器并尽力取消 typing；获取 ticket 或更新 typing 失败只记录日志，不影响聊天。
+
+请求与回复的关联、后端失败、任务超时和“何时回复完成”由业务方负责。业务方无需读取微信凭据或调用 typing 协议。若 Promise 可能在 `chat()` 返回前 reject，业务方应在创建时注册拒绝处理，避免在 SDK 获得它之前产生未处理拒绝。
 
 ### 最简示例
 

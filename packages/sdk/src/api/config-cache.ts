@@ -57,6 +57,10 @@ export class WeixinConfigManager {
             `[weixin] config ${entry?.everSucceeded ? "refreshed" : "cached"} for ${userId}`,
           );
           fetchOk = true;
+        } else {
+          this.log(
+            `[weixin] getConfig failed for ${userId} (ignored): ret=${resp.ret} errmsg=${resp.errmsg ?? ""}`,
+          );
         }
       } catch (err) {
         this.log(
